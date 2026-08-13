@@ -1067,10 +1067,11 @@ def t22_tv_import() -> None:
     with tempfile.TemporaryDirectory() as td:
         p = pathlib.Path(td) / "tv.csv"
         p.write_text(
-            "time,open,high,low,close,Volume,x_sig_dir,x_sig_score,x_sig_stop,x_sig_disp\n"
-            "2026-08-12T09:30:00-04:00,500.0,501.0,499.5,500.5,120000,0,,,\n"
-            "2026-08-12T09:31:00-04:00,500.5,502.0,500.0,501.5,90000,1,74.5,499.5,502.0\n"
-            "2026-08-12T09:32:00-04:00,501.5,501.8,500.9,501.0,70000,0,,,\n",
+            "time,open,high,low,close,Volume,"
+            "x_sig_dir,x_sig_score,x_sig_type,x_sig_stop,x_sig_disp\n"
+            "2026-08-12T09:30:00-04:00,500.0,501.0,499.5,500.5,120000,0,,,,\n"
+            "2026-08-12T09:31:00-04:00,500.5,502.0,500.0,501.5,90000,1,74.5,2,499.5,502.0\n"
+            "2026-08-12T09:32:00-04:00,501.5,501.8,500.9,501.0,70000,0,,,,\n",
             encoding="utf-8",
         )
         ex = load(p)
@@ -1085,10 +1086,15 @@ def t22_tv_import() -> None:
         rows = ex.signal_rows()
         check("one signal extracted", len(rows) == 1, f"{len(rows)}")
         if rows:
-            ts, d, sc, stop, disp = rows[0]
+            ts, d, sc, stop, disp, ty = rows[0]
             check("signal direction read", d == 1)
             check("signal score read", close_to(sc, 74.5))
             check("signal stop read", close_to(stop, 499.5))
+            check("signal displacement read", close_to(disp, 502.0))
+            # The setup type was silently dropped by an earlier version of the
+            # importer, which made a reversal-vs-continuation mismatch -- worth
+            # exactly 6 grade points -- invisible in the diff.
+            check("signal setup type read", close_to(ty, 2.0), f"{ty}")
         check("timeframe inferred as 1 minute", infer_timeframe_minutes(ex.bars) == 1)
 
         # A naive timestamp must be REJECTED, not assumed to be UTC or local --

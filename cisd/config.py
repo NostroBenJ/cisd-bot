@@ -50,6 +50,19 @@ class Config:
     bias_max_age_bars: int = 24
 
     # ── 3 · premium / discount ──────────────────────────────────────────────
+    # fix: the Pine's "previous day" is actually TWO days back. It reads
+    #   request.security(sym, "D", high[1], lookahead = barmerge.lookahead_off)
+    # but lookahead_off already returns the last CONFIRMED daily bar --
+    # yesterday -- so the [1] offset reaches back one further. The standard
+    # non-repainting idiom for a previous-day value is lookahead_ON with [1];
+    # with lookahead_off the correct expression carries no offset at all.
+    # Verified against a year of 5-minute SPY: lag 2 reproduces TradingView on
+    # 252/257 sessions (98.1%), lag 1 and lag 3 on zero.
+    # Consequence in the original: the dealing range drawn as PDH/PDL, the
+    # premium/discount depth that carries up to 22 grade points, and the draw
+    # targets are all anchored one day stale.
+    # 1 = the actual previous period (correct). 2 = reproduce the Pine.
+    prev_period_lag: int = 1
     eq_band_pct: float = 0.10            # port: eqBandPct
     w_pd: float = 22.0                   # port: wPD
     pd_strong: float = 0.55              # port: pdStrong
@@ -87,6 +100,17 @@ class Config:
     disp_atr_mult: float = 0.9           # port: dispAtrM
     disp_window_bars: int = 24           # port: dispWin
     anti_stack: bool = True              # port: gateStack
+
+    # port: the Pine constructs a block with
+    #   confirmed = (not gateDisp) or isHtfBlk,  isHtfBlk = tf != chart tf
+    # so a block from any timeframe OTHER than the chart's own skips the
+    # displacement requirement entirely. On a 5m chart with RB timeframes 5 and
+    # 15, every 15m block is auto-confirmed and the "Require displacement after
+    # RB" switch silently applies to 5m blocks only. Ported faithfully because
+    # it is arguably deliberate -- displacement on a higher-timeframe block is
+    # awkward to measure on the chart timeframe -- but it is not what the input
+    # label says, so stage 3 should measure it.
+    htf_blocks_skip_displacement: bool = True
 
     # fix: the Pine measures sweep distance against an ATR computed on the
     # rejection block's OWN timeframe while displacement and proximity use the
@@ -267,6 +291,7 @@ def pine_bug_compat(cfg: Config | None = None) -> Config:
         base,
         gate_intrinsic_any_sweep=True,   # anchor gate becomes a no-op again
         free_sweep_credit=True,          # 6.4 free points restored
+        prev_period_lag=2,               # "previous day" is two days back again
         bias_expires=False,              # bias latches forever, neutral = bull
         unify_atr_timeframe=False,       # mismatched ATR scales restored
         quota_resets_at_session=False,   # quota rolls at midnight again

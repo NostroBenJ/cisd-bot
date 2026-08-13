@@ -35,8 +35,8 @@ class TvExport:
     bars: list[Bar]
     series: dict[str, list[float]] = field(default_factory=dict)
 
-    def signal_rows(self) -> list[tuple[int, int, float, float, float]]:
-        """(ts, direction, score, stop, displacement) for every signal bar.
+    def signal_rows(self) -> list[tuple[int, int, float, float, float, float]]:
+        """(ts, direction, score, stop, displacement, setup_type) per signal bar.
 
         Empty when the export has no `x_sig_dir` column, which means the export
         patch was not applied -- reported loudly by the caller rather than
@@ -47,6 +47,7 @@ class TvExport:
         scores = self.series.get("x_sig_score", [])
         stops = self.series.get("x_sig_stop", [])
         disps = self.series.get("x_sig_disp", [])
+        types = self.series.get("x_sig_type", [])
 
         out = []
         for i, d in enumerate(dirs):
@@ -58,6 +59,7 @@ class TvExport:
                 scores[i] if i < len(scores) else math.nan,
                 stops[i] if i < len(stops) else math.nan,
                 disps[i] if i < len(disps) else math.nan,
+                types[i] if i < len(types) else math.nan,
             ))
         return out
 

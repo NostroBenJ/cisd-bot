@@ -33,6 +33,7 @@ from .context import (
     FvgStore,
     GapStore,
     LiquidityPools,
+    draw_targets,
     find_fvg,
     setup_type,
 )
@@ -42,6 +43,19 @@ from .grade import GradeInputs, grade, stack_count
 from .indicators import atr, pivot_high, pivot_low, relative_volume, session_vwap
 from .sessions import EventCalendar, KeyOpenTracker, in_session, in_window, parse_session
 from .signal import Signal, build_targets
+
+
+def _modal_spacing_minutes(bars: list[Bar]) -> int:
+    """Most common gap between consecutive bars, in minutes.
+
+    The mode, not the mean: session gaps and weekends would drag an average
+    far away from the actual bar size."""
+    counts: dict[int, int] = {}
+    for a, b in zip(bars, bars[1:]):
+        gap = (b.ts - a.ts) // 60
+        if gap > 0:
+            counts[gap] = counts.get(gap, 0) + 1
+    return max(counts.items(), key=lambda kv: kv[1])[0] if counts else 1
 
 
 # ── bias ────────────────────────────────────────────────────────────────────
@@ -154,12 +168,21 @@ class SmtTracker:
 # ── daily / weekly ranges ───────────────────────────────────────────────────
 
 
-def build_period_ranges(bars: list[Bar]) -> tuple[dict[str, tuple[float, float]], dict[str, tuple[float, float]]]:
+def build_period_ranges(
+    bars: list[Bar], lag: int = 1
+) -> tuple[dict[str, tuple[float, float]], dict[str, tuple[float, float]]]:
     """Previous-day and previous-week high/low, keyed by session date.
 
-    Returned maps answer "for a bar on date D, what were the previous day's and
-    previous week's extremes" -- so the lookup is already lagged and cannot leak
-    the current day's range into the current day's scoring."""
+    Returned maps answer "for a bar on date D, what were the previous period's
+    extremes" -- so the lookup is already lagged and cannot leak the current
+    day's range into the current day's scoring.
+
+    `lag` is how many periods back to reach. 1 is the actual previous period.
+    2 reproduces the Pine, whose `request.security(..., high[1],
+    lookahead_off)` lands two periods back rather than one -- see
+    `Config.prev_period_lag`."""
+    if lag < 1:
+        raise ValueError(f"lag must be at least 1, got {lag}")
     daily: dict[str, tuple[float, float]] = {}
     weekly_by_key: dict[str, tuple[float, float]] = {}
     order: list[str] = []
@@ -184,7 +207,7 @@ def build_period_ranges(bars: list[Bar]) -> tuple[dict[str, tuple[float, float]]
 
     prev_day: dict[str, tuple[float, float]] = {}
     for i, d in enumerate(order):
-        prev_day[d] = daily[order[i - 1]] if i > 0 else (math.nan, math.nan)
+        prev_day[d] = daily[order[i - lag]] if i >= lag else (math.nan, math.nan)
 
     week_order: list[str] = []
     for d in order:
@@ -195,7 +218,9 @@ def build_period_ranges(bars: list[Bar]) -> tuple[dict[str, tuple[float, float]]
     for d in order:
         wk = week_of[d]
         idx = week_order.index(wk)
-        prev_week[d] = weekly_by_key[week_order[idx - 1]] if idx > 0 else (math.nan, math.nan)
+        prev_week[d] = (
+            weekly_by_key[week_order[idx - lag]] if idx >= lag else (math.nan, math.nan)
+        )
 
     return prev_day, prev_week
 
@@ -220,9 +245,19 @@ class EngineStats:
     signals: int = 0
     rejected: dict[str, int] = field(default_factory=dict)
     grade_counts: dict[str, int] = field(default_factory=dict)
+    # Every rejection with the bar it happened on. This is what turns "the
+    # port missed a signal" into "the port rejected it here, for this reason",
+    # which is the difference between a diagnosis and a guess.
+    rejected_at: list[tuple[int, str]] = field(default_factory=list)
+    _ts: int = 0
 
     def reject(self, reason: str) -> None:
         self.rejected[reason] = self.rejected.get(reason, 0) + 1
+        self.rejected_at.append((self._ts, reason))
+
+    def around(self, ts: int, window_s: int = 3600) -> list[tuple[int, str]]:
+        """Rejections within `window_s` seconds of `ts`, oldest first."""
+        return [(t, r) for t, r in self.rejected_at if abs(t - ts) <= window_s]
 
 
 class CisdEngine:
@@ -244,6 +279,7 @@ class CisdEngine:
         gamma: GammaContext | None = None,
         events: EventCalendar | None = None,
         peer_bars: list[Bar] | None = None,
+        collect_diagnostics: bool = False,
     ) -> None:
         self.cfg = cfg or Config()
         self.symbol = symbol
@@ -253,6 +289,17 @@ class CisdEngine:
         self.stats = EngineStats()
         self.blocks: list[RejectionBlock] = []
         self.signals: list[Signal] = []
+        # Per-bar context series, recorded only when asked. These exist so the
+        # TradingView diff can compare the INPUT layers bar by bar instead of
+        # inferring them from four signal bars a year apart -- a score that is
+        # six points off tells you nothing about which of eight terms moved.
+        self.collect_diagnostics = collect_diagnostics
+        self.diagnostics: dict[str, list[float]] = {
+            k: [] for k in (
+                "pdh", "pdl", "pwh", "pwl", "pd_depth_bull", "pd_depth_bear",
+                "dol_up", "dol_dn", "sweep_bull", "sweep_bear",
+            )
+        }
 
     # ── main loop ───────────────────────────────────────────────────────────
 
@@ -261,6 +308,10 @@ class CisdEngine:
         if len(base_bars) < 50:
             raise ValueError(f"need at least 50 bars to warm up, got {len(base_bars)}")
 
+        # The Pine compares a block's timeframe against `timeframe.period`,
+        # the CHART timeframe. Infer it from the bars rather than assuming the
+        # base is 1-minute: a 5-minute export makes 5 the chart timeframe.
+        self._chart_tf = _modal_spacing_minutes(base_bars)
         timeframes = self._timeframes()
         series = {tf: (base_bars if tf == 1 else resample(base_bars, tf)) for tf in timeframes}
         atrs = {tf: atr(series[tf], cfg.atr_length) for tf in timeframes}
@@ -276,7 +327,7 @@ class CisdEngine:
         vwap, _vwap_sd = session_vwap(base_bars)
         rvol = relative_volume(base_bars, cfg.rvol_lookback_sessions)
 
-        prev_day, prev_week = build_period_ranges(base_bars)
+        prev_day, prev_week = build_period_ranges(base_bars, cfg.prev_period_lag)
 
         smt = SmtTracker(cfg)
         smt.build(base_bars, self.peer_bars)
@@ -294,6 +345,7 @@ class CisdEngine:
 
         for i, bar in enumerate(base_bars):
             self.stats.bars += 1
+            self.stats._ts = bar.ts
 
             # session bookkeeping
             d = bar.session_date_ny
@@ -311,6 +363,20 @@ class CisdEngine:
             pools.update(bar, i, dr)
             gaps.update(bar, base_atr[i])
             smt.update(base_bars, i)
+
+            if self.collect_diagnostics:
+                d = self.diagnostics
+                d["pdh"].append(dr.pdh)
+                d["pdl"].append(dr.pdl)
+                d["pwh"].append(dr.pwh)
+                d["pwl"].append(dr.pwl)
+                d["pd_depth_bull"].append(dr.depth(bar.close, True))
+                d["pd_depth_bear"].append(dr.depth(bar.close, False))
+                up, dn = draw_targets(bar.close, dr, pools)
+                d["dol_up"].append(up if up is not None else math.nan)
+                d["dol_dn"].append(dn if dn is not None else math.nan)
+                d["sweep_bull"].append(1.0 if pools.recently_swept(True) else 0.0)
+                d["sweep_bear"].append(1.0 if pools.recently_swept(False) else 0.0)
 
             # advance the bias timeframe as its bars close
             while (
@@ -434,7 +500,10 @@ class CisdEngine:
         blk.dol_type = st
         blk.smt_ok = gi.smt_confirmed
         blk.amdx = amdx
-        blk.confirmed = not cfg.require_displacement
+        is_htf = blk.timeframe != self._chart_tf
+        blk.confirmed = (not cfg.require_displacement) or (
+            cfg.htf_blocks_skip_displacement and is_htf
+        )
 
         if cfg.anti_stack and self._superseded(blk):
             self.stats.reject("anti_stack")
@@ -535,23 +604,35 @@ class CisdEngine:
                     if not z.ever_armed:
                         z.ever_armed = True
                         self.stats.blocks_armed += 1
-            elif z.armed and (bar.low > z.top if z.bull else bar.high < z.bottom):
-                z.armed = False
 
-            if not z.armed or z.tapped:
-                continue
+            # 5 · the CISD trigger, read on the base timeframe.
+            #
+            # THE ORDER OF 4, 5 AND 6 IS LOAD-BEARING. The Pine arms, then
+            # tests the trigger, and only then disarms. Disarming before the
+            # trigger -- which reads as the obvious cleanup -- discards every
+            # signal where price retested the zone and pushed back out of it on
+            # the SAME bar that the change in state fired. That is the normal
+            # shape of the setup, not an edge case: the bar that closes through
+            # the initiating open is usually the bar that leaves the zone.
+            if z.armed and not z.tapped:
+                fired = True
+                if cfg.use_cisd_trigger:
+                    fired, _lvl = cisd_close(base_bars, i, z.bull, cfg)
+                if fired:
+                    z.tapped = True
+                    self.stats.triggers += 1
+                    sig = self._emit(
+                        z, base_bars, i, bar, dr, pools, fvgs, gaps, keyopens,
+                        bias, smt, base_atr_v, vwap_v, rvol_v,
+                    )
+                    if sig is not None and (best is None or sig.score > best[0]):
+                        best = (sig.score, sig)
 
-            # 5 · the CISD trigger, read on the base timeframe
-            if cfg.use_cisd_trigger:
-                fired, _lvl = cisd_close(base_bars, i, z.bull, cfg)
-                if not fired:
-                    continue
-
-            z.tapped = True
-            self.stats.triggers += 1
-            sig = self._emit(z, base_bars, i, bar, dr, pools, fvgs, gaps, keyopens, bias, smt, base_atr_v, vwap_v, rvol_v)
-            if sig is not None and (best is None or sig.score > best[0]):
-                best = (sig.score, sig)
+            # 6 · disarm only after the trigger has had its chance
+            if z.armed and not z.tapped:
+                left = bar.low > z.top if z.bull else bar.high < z.bottom
+                if left:
+                    z.armed = False
 
         return best[1] if best else None
 

@@ -1,23 +1,24 @@
 // ─────────────────────────────────────────────────────────────────────────
-// CISD export series. Append to the END of CISD_Powell_RB_v29_SPY.pine
+// CISD export series v2. Append to the END of CISD_Powell_RB_v29_SPY.pine
+//
+// If you already pasted v1, DELETE that block first and paste this instead.
 //
 // The indicator has no plot() calls of its own, so TradingView's chart
 // export writes OHLCV and nothing else. These plots exist only to be
 // exported: display.data_window keeps them off the chart pane, so nothing
 // about the visual output or the price scale changes.
 //
-// Variable names are prefixed x_ so they sort together in the export and
-// cannot collide with anything already in the script.
+// v2 adds the context series. v1 could only compare four signal bars a
+// year apart, and a score six points off says nothing about which of eight
+// terms moved. These let every input layer be checked bar by bar.
 // ─────────────────────────────────────────────────────────────────────────
 
 // Signal direction on this bar: 1 long, -1 short, 0 none.
-// longFlag and shortFlag are already quota-limited, which is what we want
-// to compare against.
+// longFlag and shortFlag are already quota-limited.
 float xSigDir = longFlag ? 1.0 : shortFlag ? -1.0 : 0.0
 
-// The remaining fields mean nothing on a bar that produced no signal.
-// Exporting them unconditionally would fill the CSV with the leftovers of
-// whichever block happened to score highest.
+// Only meaningful on a signal bar. Exporting unconditionally would fill the
+// CSV with the leftovers of whichever block happened to score highest.
 bool  xHas   = longFlag or shortFlag
 float xScore = xHas ? barBestScore : na
 float xType  = xHas ? barBestType  : na
@@ -30,19 +31,41 @@ plot(xType,   "x_sig_type",  display = display.data_window)
 plot(xStop,   "x_sig_stop",  display = display.data_window)
 plot(xDisp,   "x_sig_disp",  display = display.data_window)
 
-// Context series. Not part of the pass/fail diff, but they localise a
-// mismatch fast: if the bias column diverges before the signals do, the
-// bug is in the bias layer and not in the trigger.
+// Context. Not part of the pass/fail diff, but they localise a mismatch:
+// if the dealing range diverges before the signals do, the bug is there.
 float xBias   = biasDir
 float xBlocks = array.size(rbs)
 float xSessN  = sessSignals
 float xAtr    = atrChart
-float xPdh    = pdh
-float xPdl    = pdl
 
 plot(xBias,   "x_bias",        display = display.data_window)
 plot(xBlocks, "x_live_blocks", display = display.data_window)
 plot(xSessN,  "x_session_n",   display = display.data_window)
 plot(xAtr,    "x_atr",         display = display.data_window)
-plot(xPdh,    "x_pdh",         display = display.data_window)
-plot(xPdl,    "x_pdl",         display = display.data_window)
+
+// Dealing range, daily AND weekly. The weekly leg is the one that cannot
+// currently be checked, and f_pdDepth blends it 35% into a term worth up to
+// 22 grade points.
+plot(pdh, "x_pdh", display = display.data_window)
+plot(pdl, "x_pdl", display = display.data_window)
+plot(pwh, "x_pwh", display = display.data_window)
+plot(pwl, "x_pwl", display = display.data_window)
+
+// The depth function itself, evaluated at the close for both directions.
+// This tests f_pdDepth end to end -- daily/weekly blend, the 0.65/0.35
+// weights and the 1.5 exponent -- on every bar rather than at four signals.
+float xPdBull = f_pdDepth(close, true)
+float xPdBear = f_pdDepth(close, false)
+plot(xPdBull, "x_pd_bull", display = display.data_window)
+plot(xPdBear, "x_pd_bear", display = display.data_window)
+
+// Draw on liquidity. The reversal-vs-continuation split is worth exactly
+// 6 grade points (14 vs 8), which is the size of the observed mismatch.
+plot(dolUp, "x_dol_up", display = display.data_window)
+plot(dolDn, "x_dol_dn", display = display.data_window)
+
+// Engineered-liquidity sweeps, worth 16 points.
+float xSwpBull = sweepBull ? 1.0 : 0.0
+float xSwpBear = sweepBear ? 1.0 : 0.0
+plot(xSwpBull, "x_swp_bull", display = display.data_window)
+plot(xSwpBear, "x_swp_bear", display = display.data_window)

@@ -67,14 +67,18 @@ def layer_bars(export) -> int:
         return tf
 
     zero_vol = sum(1 for b in bars if b.volume <= 0)
-    if zero_vol:
+    if zero_vol == len(bars):
+        # Every bar zero almost always means the export carried no volume
+        # column at all, which is fine for a parity diff (compat mode reads no
+        # volume) but fatal for stage 3, where the volume terms are live.
+        print("  warn no volume in this export -- fine for the parity diff, "
+              "but stage 3 needs a feed that carries it")
+    elif zero_vol:
         pct = 100.0 * zero_vol / len(bars)
-        # Zero volume across a whole export is the phantom-bar signature that
-        # Robinhood's history had. Worth shouting about before anything else.
-        print(f"  warn {zero_vol} bars ({pct:.1f}%) have zero volume")
-        if pct > 50:
-            print("  FAIL more than half the bars carry no volume -- "
-                  "this looks like synthesised data, not a real tape")
+        # A PARTIALLY zero volume column is the phantom-bar signature that
+        # Robinhood's history had, and that is worth shouting about.
+        print(f"  FAIL {zero_vol} bars ({pct:.1f}%) have zero volume while "
+              f"others do not -- suspect synthesised gap-fill bars")
     print("  ok")
     return tf
 
@@ -116,7 +120,7 @@ def layer_dealing_range(export, cfg: Config) -> None:
         print("  skipped (no x_pdh / x_pdl columns)")
         return
 
-    prev_day, _ = build_period_ranges(export.bars)
+    prev_day, _ = build_period_ranges(export.bars, cfg.prev_period_lag)
     mismatches = 0
     compared = 0
     first: tuple[str, float, float] | None = None
@@ -139,6 +143,79 @@ def layer_dealing_range(export, cfg: Config) -> None:
         print(f"  FAIL first at {first[0]}: ours {first[1]:.2f} vs TV {first[2]:.2f}")
         print("  likely cause: the export covers regular hours only while the "
               "Pine's daily security call includes extended hours, or vice versa")
+
+
+def _compare_series(
+    label: str, ours: list[float], tv: list[float] | None, tol: float
+) -> bool:
+    """Compare one port-computed series against its TradingView column.
+
+    Bars where either side is nan are skipped rather than counted as matches:
+    a nan on both sides usually means "not warmed up yet", and agreeing
+    trivially there would paper over a real gap elsewhere."""
+    if tv is None:
+        print(f"    {label:<15} skipped (column absent -- export patch v1?)")
+        return True
+    n = min(len(ours), len(tv))
+    compared = mismatched = 0
+    first: tuple[int, float, float] | None = None
+    for i in range(n):
+        a, b = ours[i], tv[i]
+        if math.isnan(a) or math.isnan(b):
+            continue
+        compared += 1
+        if abs(a - b) > tol:
+            mismatched += 1
+            if first is None:
+                first = (i, a, b)
+    if compared == 0:
+        print(f"    {label:<15} nothing to compare")
+        return True
+    pct = 100.0 * mismatched / compared
+    status = "ok  " if mismatched == 0 else "FAIL"
+    line = f"    {label:<15} {status} {compared - mismatched}/{compared} match"
+    if mismatched:
+        line += f"  ({pct:.1f}% differ)"
+    print(line)
+    if first is not None:
+        print(f"                    first at bar {first[0]}: "
+              f"ours {first[1]:.4f} vs TV {first[2]:.4f}")
+    return mismatched == 0
+
+
+def layer_context(export, cfg: Config) -> None:
+    """Per-bar diff of every context input the grader reads.
+
+    This is where a six-point score gap becomes a named cause. Each row feeds
+    a specific grade term and is annotated with what that term is worth, so a
+    failure here maps directly onto an observed score difference."""
+    print("\nlayer 3b · context series (per bar)")
+    engine = CisdEngine(cfg, symbol="SPY", collect_diagnostics=True)
+    engine.run(export.bars)
+    d = engine.diagnostics
+    g = export.series.get
+
+    if g("x_pwh") is None:
+        print("    export patch v1 detected -- re-export with v2 to check the")
+        print("    weekly range, depth function, draw targets and sweeps.")
+
+    print("  dealing range (feeds premium/discount, worth up to 22 points)")
+    _compare_series("prev day high", d["pdh"], g("x_pdh"), 1e-4)
+    _compare_series("prev day low", d["pdl"], g("x_pdl"), 1e-4)
+    _compare_series("prev week high", d["pwh"], g("x_pwh"), 1e-4)
+    _compare_series("prev week low", d["pwl"], g("x_pwl"), 1e-4)
+
+    print("  the depth function itself (0.65/0.35 blend, 1.5 exponent)")
+    _compare_series("depth bull", d["pd_depth_bull"], g("x_pd_bull"), 1e-6)
+    _compare_series("depth bear", d["pd_depth_bear"], g("x_pd_bear"), 1e-6)
+
+    print("  draw on liquidity (reversal vs continuation = 6 points)")
+    _compare_series("draw above", d["dol_up"], g("x_dol_up"), 1e-4)
+    _compare_series("draw below", d["dol_dn"], g("x_dol_dn"), 1e-4)
+
+    print("  engineered liquidity sweeps (16 points)")
+    _compare_series("sweep bull", d["sweep_bull"], g("x_swp_bull"), 0.5)
+    _compare_series("sweep bear", d["sweep_bear"], g("x_swp_bear"), 0.5)
 
 
 def layer_bias(export, cfg: Config) -> None:
@@ -176,11 +253,11 @@ def layer_signals(export, cfg: Config, score_tol: float) -> bool:
     engine = CisdEngine(cfg, symbol="SPY")
     ours = engine.run(export.bars)
 
-    tv_by_ts = {ts: (d, sc, st, dp) for ts, d, sc, st, dp in tv_rows}
+    tv_by_ts = {ts: (d, sc, st, dp, ty) for ts, d, sc, st, dp, ty in tv_rows}
     our_by_ts = {s.ts: s for s in ours}
 
     matched, wrong_dir, wrong_score = [], [], []
-    for ts, (d, sc, _st, _dp) in tv_by_ts.items():
+    for ts, (d, sc, _st, _dp, _ty) in tv_by_ts.items():
         s = our_by_ts.get(ts)
         if s is None:
             continue
@@ -204,7 +281,7 @@ def layer_signals(export, cfg: Config, score_tol: float) -> bool:
     print(f"  port only           : {len(port_only)}")
 
     for ts in tv_only[:5]:
-        d, sc, _, _ = tv_by_ts[ts]
+        d, sc, _, _, _ = tv_by_ts[ts]
         print(f"    missed  {_fmt_ts(ts)}  dir={d:+d} score={sc:.1f}")
     for ts in port_only[:5]:
         s = our_by_ts[ts]
@@ -272,6 +349,7 @@ def main() -> int:
 
     layer_atr(export, cfg)
     layer_dealing_range(export, cfg)
+    layer_context(export, cfg)
     layer_bias(export, cfg)
     ok = layer_signals(export, cfg, args.score_tol)
 

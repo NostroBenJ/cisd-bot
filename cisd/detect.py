@@ -251,8 +251,12 @@ def detect_rejection_block(
             strong_close=strong,
             large_range=large_range,
             rvol=rvol,
-            displacement_peak=b.high,
-            displacement_extreme=b.high,
+            # Pine seeds peak at the midpoint and dispExt at the zone edge, NOT
+            # at the formation bar's own extreme. Seeding from the bar's high
+            # counts the formation candle itself as displacement, which
+            # confirms almost every block instantly.
+            displacement_peak=(b.body_bottom + b.low) / 2.0,
+            displacement_extreme=b.body_bottom,
         )
 
     if b.is_down:
@@ -278,8 +282,8 @@ def detect_rejection_block(
             strong_close=strong,
             large_range=large_range,
             rvol=rvol,
-            displacement_peak=b.low,
-            displacement_extreme=b.low,
+            displacement_peak=(b.high + b.body_top) / 2.0,
+            displacement_extreme=b.body_top,
         )
 
     return None
