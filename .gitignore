@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+data/*.csv
+data/*.json
+!data/events.example.json
+data_store/
+.env
+*.log
