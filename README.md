@@ -15,13 +15,39 @@ python verify_cisd.py
 | Stage | State |
 |---|---|
 | 1 · Python port of the indicator | **done** — this repo |
-| 2 · Bar-for-bar validation against TradingView | **not started** — needs TV data export |
-| 3 · Signal quality on SPY underlying (free data) | **not started** |
-| 4 · Options P&L (OptionsDX intraday chains) | **not started** |
-| 5 · Execution bot + dashboard | **not started** |
+| 2 · Signal-for-signal diff against TradingView | **tooling ready**, awaiting an export |
+| 3 · Signal quality on SPY underlying (free data) | not started |
+| 4 · Options P&L (OptionsDX intraday chains) | not started |
+| 5 · Execution bot + dashboard | not started |
 
 Nothing here has been checked against real market data yet. Every number below
 comes from synthetic bars and proves only that the code does what it says.
+
+## Stage 2: diffing against TradingView
+
+The indicator contains **no `plot()` calls** — it draws with boxes, lines,
+labels and a table. TradingView's chart export only writes `plot()` series, so
+a plain export carries OHLCV and nothing to compare against.
+
+1. Append `tools/pine_export_patch.pine` to the indicator and save. It adds
+   export-only series (`display.data_window`), so the chart looks unchanged.
+2. Set SPY to the timeframe and settings you actually trade, scroll left until
+   history stops loading (Premium caps at 20,000 bars ≈ 51 days of 1-minute
+   RTH), then right-click → **Export chart data**, ISO time, indicator ticked.
+3. Save to `data/tv_export.csv` and run:
+
+```bash
+python compare_tv.py data/tv_export.csv --rb 5,15 --bias 60
+```
+
+It runs in `pine_bug_compat` mode — the aim is to reproduce the original
+**including** its six defects. A diff against the corrected build would
+disagree by design and prove nothing. Once parity holds, turn the fixes on one
+at a time and the change in the signal set becomes a measurement.
+
+The comparison is layered — bars → ATR → previous-day range → bias → signals —
+because "the signals differ" is not a diagnosis. A mismatch at the ATR layer
+makes everything after it meaningless, so fix the first failing layer.
 
 ## Why the port exists
 
@@ -123,19 +149,48 @@ cisd/
   grade.py        Scoring and confluence counting
   signal.py       Entry/stop/target contract and reasoning
   engine.py       Lifecycle state machine, multi-timeframe orchestration
+  risk.py         Hard limits and position sizing for unattended execution
   config.py       Every parameter, with port/fix/new labelled
-verify_cisd.py    128 checks
+tools/
+  pine_export_patch.pine   Append to the indicator to make it exportable
+  tv_import.py             TradingView CSV loader
+compare_tv.py     Layered diff: port vs TradingView
+verify_cisd.py    165 checks
 ```
 
 Stdlib only. No numpy, no pandas.
 
+## Risk limits
+
+Everything in `RiskLimits` is a **percentage of session-starting equity**, so
+none of it waits on the account being funded — the only thing that does is the
+equity figure passed to `start_session`. Defaults are deliberately tight
+(3% daily loss, 1% per trade, 4 trades/day, 2 concurrent, flat at 11:55) and
+are a starting point for a bot with no measured edge, not a recommendation.
+Revisit them against a stage-3 distribution, never against a good week.
+
+**Every gate fails closed** — unknown equity, unusable price, uninitialised
+session all answer "no trade". A bot that declines a good signal costs an
+opportunity; one that trades on half-initialised state costs money at machine
+speed.
+
+Sizing treats the **full premium as the risk**, not the delta-estimated loss at
+the underlying stop. Premium is what can actually be lost: a gap, a halt, or a
+fast repricing all resolve toward total loss on a short-dated long option, and
+the delta estimate assumes an orderly exit a bad morning will not provide.
+`sizing_mode="delta"` is available and sizes larger.
+
+Creating the file at `RiskLimits.kill_file` blocks new entries and forces a
+flatten. A file, because it works when the process is wedged and needs no IPC.
+
 ## Next
 
-1. Export TradingView signals and diff against `pine_bug_compat()` — until that
-   matches, the port is unverified against the thing it copies.
+1. **Export from TradingView and run `compare_tv.py`.** Until parity holds, the
+   port's signal set is not the Pine's.
 2. Real 1-minute SPY bars. **Robinhood's history is phantom beyond ~6 months**
    (constant `777.77`, volume 0, `interpolated: true`) — verified, and it would
    have produced a flawless meaningless equity curve. FirstRate gives 1 year
    free, 27 years for $99.95.
 3. Measure: signal count, grade distribution, stop-vs-target hit rate, MFE/MAE,
    with the `sqrt(n_indep)` correction for overlapping signals.
+4. Recalibrate the grade thresholds against that real distribution.

@@ -28,6 +28,7 @@ The three that matter most:
 from __future__ import annotations
 
 import math
+import pathlib
 import random
 import sys
 from dataclasses import replace
@@ -40,7 +41,7 @@ from cisd.detect import _opposing_run, cisd_close, detect_rejection_block
 from cisd.engine import CisdEngine, build_period_ranges
 from cisd.indicators import atr, pivot_high, pivot_low, relative_volume, rma, session_vwap, true_range
 from cisd.sessions import EventCalendar, in_window, parse_session
-from cisd.signal import build_targets
+from cisd.signal import Signal, build_targets
 
 PASS, FAIL = 0, 0
 TOL = 1e-9
@@ -946,6 +947,180 @@ def t20_determinism() -> None:
 # ── report ──────────────────────────────────────────────────────────────────
 
 
+def t21_risk() -> None:
+    print("\n[21] risk limits")
+    from cisd.risk import RiskGate, RiskLimits
+
+    lim = RiskLimits(max_daily_loss_pct=3.0, max_risk_per_trade_pct=1.0,
+                     max_trades_per_day=4, max_concurrent_positions=2,
+                     kill_file="data/__nonexistent_kill__")
+    g = RiskGate(lim)
+
+    # Fails closed before initialisation -- the property that matters most for
+    # an unattended bot, because a half-started process is exactly when a
+    # permissive default does damage.
+    dummy = Signal(ts=0, symbol="SPY", direction="long", entry=500.0, stop=498.0,
+                   targets=[], grade="A", score=70, stack=3, timeframe=5,
+                   setup_type="reversal", tf_agreement=2, bias="bull")
+    check("uninitialised gate refuses to trade", not g.can_open(dummy, 1.0, 600))
+
+    g.start_session(equity=10_000.0, session_date="2026-08-13")
+    check("daily loss budget is 3% of equity", close_to(g.daily_loss_budget, 300.0))
+    check("per-trade budget is 1% of equity", close_to(g.per_trade_budget, 100.0))
+
+    # $1.50 contract costs $150; a $100 budget cannot buy one.
+    d = g.can_open(dummy, 1.50, 600)
+    check("refuses when one contract exceeds the budget", not d.allowed, d.reason)
+
+    # $0.40 contract costs $40; $100 buys two.
+    d = g.can_open(dummy, 0.40, 600)
+    check("sizes to the budget", d.allowed and d.contracts == 2, f"{d.contracts} {d.reason}")
+
+    # Absolute contract cap binds before the budget does.
+    g_cap = RiskGate(replace(lim, max_contracts_per_trade=1))
+    g_cap.start_session(10_000.0, "2026-08-13")
+    check("absolute contract cap binds", g_cap.can_open(dummy, 0.40, 600).contracts == 1)
+
+    # Delta sizing is never smaller than premium sizing, and is capped by
+    # premium -- a delta loss cannot exceed a total loss.
+    g_delta = RiskGate(replace(lim, sizing_mode="delta"))
+    g_delta.start_session(10_000.0, "2026-08-13")
+    n_prem = g.size(dummy, 1.00, delta=0.5)
+    n_delta = g_delta.size(dummy, 1.00, delta=0.5)
+    check("delta sizing is at least premium sizing", n_delta >= n_prem,
+          f"delta={n_delta} premium={n_prem}")
+
+    # Losses eat the budget, and the per-trade budget is capped by what remains.
+    g.record_open(2, 80.0)
+    g.record_close(-250.0)
+    check("loss reduces the remaining budget", close_to(g.loss_remaining, 50.0),
+          f"{g.loss_remaining}")
+    check("per-trade budget is capped by the remaining daily budget",
+          close_to(g.budget_for_trade(), 50.0), f"{g.budget_for_trade()}")
+
+    g.record_open(1, 40.0)
+    g.record_close(-60.0)
+    check("breaching the daily loss halts the gate", g.halted_reason is not None)
+    check("a halted gate refuses new trades", not g.can_open(dummy, 0.10, 600))
+
+    # Trade count cap.
+    g2 = RiskGate(lim)
+    g2.start_session(10_000.0, "2026-08-13")
+    for _ in range(4):
+        g2.record_open(1, 10.0)
+        g2.record_close(0.0)
+    check("daily trade cap refuses the fifth", not g2.can_open(dummy, 0.10, 600))
+
+    # Concurrency cap.
+    g3 = RiskGate(lim)
+    g3.start_session(10_000.0, "2026-08-13")
+    g3.record_open(1, 10.0)
+    g3.record_open(1, 10.0)
+    check("concurrency cap refuses a third position", not g3.can_open(dummy, 0.10, 600))
+
+    # Hard flat time. 11:55 = 715 minutes.
+    g4 = RiskGate(lim)
+    g4.start_session(10_000.0, "2026-08-13")
+    check("trading allowed before the flat time", g4.can_open(dummy, 0.10, 700).allowed)
+    check("must flatten at the hard time", g4.must_flatten(715) is not None)
+    check("refuses new entries at the flat time", not g4.can_open(dummy, 0.10, 715))
+
+    # A stop too far away is refused outright, not sized down.
+    wide = Signal(ts=0, symbol="SPY", direction="long", entry=500.0, stop=480.0,
+                  targets=[], grade="A", score=70, stack=3, timeframe=5,
+                  setup_type="reversal", tf_agreement=2, bias="bull")
+    check("an over-wide stop is refused", not g4.can_open(wide, 0.10, 600))
+
+    # Unusable price fails closed rather than sizing off a nan.
+    check("nan contract price is refused", not g4.can_open(dummy, float("nan"), 600))
+    check("zero contract price is refused", not g4.can_open(dummy, 0.0, 600))
+
+    # Kill file.
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        kf = pathlib.Path(td) / "KILL"
+        g5 = RiskGate(replace(lim, kill_file=str(kf)))
+        g5.start_session(10_000.0, "2026-08-13")
+        check("no kill file means trading is allowed", g5.can_open(dummy, 0.10, 600).allowed)
+        kf.write_text("stop", encoding="utf-8")
+        check("kill file blocks new entries", not g5.can_open(dummy, 0.10, 600))
+        check("kill file forces a flatten", g5.must_flatten(600) is not None)
+
+    check("start_session rejects zero equity",
+          _raises(lambda: RiskGate(lim).start_session(0.0, "2026-08-13")))
+
+
+def _raises(fn) -> bool:
+    try:
+        fn()
+    except Exception:
+        return True
+    return False
+
+
+def t22_tv_import() -> None:
+    print("\n[22] TradingView import")
+    import tempfile
+
+    from tools.tv_import import infer_timeframe_minutes, load
+
+    with tempfile.TemporaryDirectory() as td:
+        p = pathlib.Path(td) / "tv.csv"
+        p.write_text(
+            "time,open,high,low,close,Volume,x_sig_dir,x_sig_score,x_sig_stop,x_sig_disp\n"
+            "2026-08-12T09:30:00-04:00,500.0,501.0,499.5,500.5,120000,0,,,\n"
+            "2026-08-12T09:31:00-04:00,500.5,502.0,500.0,501.5,90000,1,74.5,499.5,502.0\n"
+            "2026-08-12T09:32:00-04:00,501.5,501.8,500.9,501.0,70000,0,,,\n",
+            encoding="utf-8",
+        )
+        ex = load(p)
+        check("bars parsed", len(ex.bars) == 3, f"{len(ex.bars)}")
+        check("OHLCV read correctly", close_to(ex.bars[1].high, 502.0)
+              and close_to(ex.bars[1].volume, 90000))
+        check("NY wall-clock time round-trips",
+              ex.bars[0].dt_ny.strftime("%H:%M") == "09:30",
+              ex.bars[0].dt_ny.strftime("%H:%M"))
+        check("export patch detected", ex.has_export_patch())
+
+        rows = ex.signal_rows()
+        check("one signal extracted", len(rows) == 1, f"{len(rows)}")
+        if rows:
+            ts, d, sc, stop, disp = rows[0]
+            check("signal direction read", d == 1)
+            check("signal score read", close_to(sc, 74.5))
+            check("signal stop read", close_to(stop, 499.5))
+        check("timeframe inferred as 1 minute", infer_timeframe_minutes(ex.bars) == 1)
+
+        # A naive timestamp must be REJECTED, not assumed to be UTC or local --
+        # guessing shifts every bar by hours and the diff then fails for a
+        # reason unrelated to the port.
+        q = pathlib.Path(td) / "naive.csv"
+        q.write_text(
+            "time,open,high,low,close\n2026-08-12T09:30:00,500,501,499,500\n",
+            encoding="utf-8",
+        )
+        check("naive timestamps are rejected", _raises(lambda: load(q)))
+
+        # Epoch seconds are accepted.
+        r = pathlib.Path(td) / "epoch.csv"
+        r.write_text("time,open,high,low,close\n1786541400,500,501,499,500\n",
+                     encoding="utf-8")
+        check("epoch timestamps are accepted", len(load(r).bars) == 1)
+
+        # A missing OHLC column is an error, not a silent zero.
+        s = pathlib.Path(td) / "bad.csv"
+        s.write_text("time,open,close\n1786541400,500,500\n", encoding="utf-8")
+        check("missing columns raise", _raises(lambda: load(s)))
+
+        # An export without the patch must say so rather than compare to zero.
+        t = pathlib.Path(td) / "nopatch.csv"
+        t.write_text("time,open,high,low,close\n1786541400,500,501,499,500\n"
+                     "1786541460,500,501,499,500\n", encoding="utf-8")
+        ex2 = load(t)
+        check("missing export patch is detected", not ex2.has_export_patch())
+        check("no patch yields no signal rows", ex2.signal_rows() == [])
+
+
 def report_shape() -> None:
     """Not a test -- the descriptive numbers that decide what to fix next."""
     print("\n── model shape on synthetic data ──")
@@ -1003,6 +1178,8 @@ def main() -> int:
     t18_fvg()
     t19_engine_consistency()
     t20_determinism()
+    t21_risk()
+    t22_tv_import()
 
     print("\n" + "=" * 70)
     print(f"{PASS} passed, {FAIL} failed")
