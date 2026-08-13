@@ -1,58 +1,48 @@
-// ════════════════════════════════════════════════════════════════════════════
-//  EXPORT PATCH  —  append verbatim to the END of CISD_Powell_RB_v29_SPY.pine
+// ─────────────────────────────────────────────────────────────────────────
+// CISD export series. Append to the END of CISD_Powell_RB_v29_SPY.pine
 //
-//  Why this is needed: the indicator currently contains NO plot() calls. It
-//  draws with boxes, lines, labels and a table. TradingView's "Export chart
-//  data" only writes plot() series to CSV, so without this the export is
-//  OHLCV and nothing else — there is no signal column to diff against.
+// The indicator has no plot() calls of its own, so TradingView's chart
+// export writes OHLCV and nothing else. These plots exist only to be
+// exported: display.data_window keeps them off the chart pane, so nothing
+// about the visual output or the price scale changes.
 //
-//  display.data_window keeps these out of the chart pane (no visual change,
-//  no scale distortion) while still including them in the CSV export and the
-//  data window.
-//
-//  HOW TO EXPORT
-//    1. Paste this block at the end of the indicator and save.
-//    2. Open SPY, set the chart to the timeframe you actually trade, and set
-//       every indicator setting to the values you actually run.
-//    3. Scroll left until the chart stops loading more history. Premium caps
-//       at 20,000 bars — about 51 trading days of 1-minute RTH data.
-//    4. Right-click the chart -> Export chart data...
-//         Format:    ISO time
-//         Include:   the CISD° indicator (tick it)
-//    5. Save as tv_export.csv into cisd-bot/data/
-//    6. python compare_tv.py data/tv_export.csv
-//
-//  IMPORTANT: export the settings you actually trade, and tell compare_tv.py
-//  about any that differ from the defaults. A diff against a different
-//  parameter set proves nothing.
-// ════════════════════════════════════════════════════════════════════════════
+// Variable names are prefixed x_ so they sort together in the export and
+// cannot collide with anything already in the script.
+// ─────────────────────────────────────────────────────────────────────────
 
-// Direction of the signal this bar: 1 long, -1 short, 0 none.
-// longFlag / shortFlag are already quota-limited, which is what we want to
-// compare — the port applies its quota at the same point.
-sigDir = longFlag ? 1 : shortFlag ? -1 : 0
+// Signal direction on this bar: 1 long, -1 short, 0 none.
+// longFlag and shortFlag are already quota-limited, which is what we want
+// to compare against.
+float xSigDir = longFlag ? 1.0 : shortFlag ? -1.0 : 0.0
 
-// The remaining fields are only meaningful on a signal bar. Exporting them
-// unconditionally would fill the CSV with the leftovers of whichever block
-// happened to score highest on a bar that produced nothing.
-hasSig   = longFlag or shortFlag
-sigScore = hasSig ? barBestScore : na
-sigType  = hasSig ? barBestType  : na
-sigStop  = hasSig ? barBestExt   : na
-sigDisp  = hasSig ? barBestDisp  : na
+// The remaining fields mean nothing on a bar that produced no signal.
+// Exporting them unconditionally would fill the CSV with the leftovers of
+// whichever block happened to score highest.
+bool  xHas   = longFlag or shortFlag
+float xScore = xHas ? barBestScore : na
+float xType  = xHas ? barBestType  : na
+float xStop  = xHas ? barBestExt   : na
+float xDisp  = xHas ? barBestDisp  : na
 
-plot(sigDir,   "x_sig_dir",   display = display.data_window)
-plot(sigScore, "x_sig_score", display = display.data_window)
-plot(sigType,  "x_sig_type",  display = display.data_window)
-plot(sigStop,  "x_sig_stop",  display = display.data_window)
-plot(sigDisp,  "x_sig_disp",  display = display.data_window)
+plot(xSigDir, "x_sig_dir",   display = display.data_window)
+plot(xScore,  "x_sig_score", display = display.data_window)
+plot(xType,   "x_sig_type",  display = display.data_window)
+plot(xStop,   "x_sig_stop",  display = display.data_window)
+plot(xDisp,   "x_sig_disp",  display = display.data_window)
 
-// Context series. These are not part of the pass/fail diff but they localise a
-// mismatch fast: if x_bias diverges before the signals do, the bug is in the
-// bias layer and not in the trigger.
-plot(biasDir,             "x_bias",        display = display.data_window)
-plot(array.size(rbs),     "x_live_blocks", display = display.data_window)
-plot(sessSignals,         "x_session_n",   display = display.data_window)
-plot(atrChart,            "x_atr",         display = display.data_window)
-plot(pdh,                 "x_pdh",         display = display.data_window)
-plot(pdl,                 "x_pdl",         display = display.data_window)
+// Context series. Not part of the pass/fail diff, but they localise a
+// mismatch fast: if the bias column diverges before the signals do, the
+// bug is in the bias layer and not in the trigger.
+float xBias   = biasDir
+float xBlocks = array.size(rbs)
+float xSessN  = sessSignals
+float xAtr    = atrChart
+float xPdh    = pdh
+float xPdl    = pdl
+
+plot(xBias,   "x_bias",        display = display.data_window)
+plot(xBlocks, "x_live_blocks", display = display.data_window)
+plot(xSessN,  "x_session_n",   display = display.data_window)
+plot(xAtr,    "x_atr",         display = display.data_window)
+plot(xPdh,    "x_pdh",         display = display.data_window)
+plot(xPdl,    "x_pdl",         display = display.data_window)
