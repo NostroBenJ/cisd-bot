@@ -1,0 +1,83 @@
+// ═════════════════════════════════════════════════════════════════════════
+// CISD strategy conversion — for TradingView Deep Backtesting
+//
+// Two edits to CISD_Powell_RB_v29_SPY.pine. Work on a COPY: once this is a
+// strategy() it stops being usable as a chart indicator alongside your live
+// one, and the Strategy Tester will place orders on every signal.
+//
+// STEP 1 — replace the indicator() declaration on line 8 with the
+//          strategy() call in PART A below.
+// STEP 2 — append PART B to the end of the file.
+//
+// Then: Strategy Tester tab -> Deep Backtesting -> pick the widest date
+// range offered -> Generate. Read the Performance Summary and the List of
+// Trades, not the chart.
+//
+// WHAT THIS MEASURES: the underlying leg. TradingView cannot price options,
+// so a positive result here is necessary but not sufficient — theta, spread
+// and the delta path still have to be paid before it becomes an options
+// edge. A negative result here is decisive, though: if the direction is
+// wrong, no options structure rescues it.
+// ═════════════════════════════════════════════════════════════════════════
+
+
+// ───────────────────────── PART A — replaces line 8 ──────────────────────
+//
+// use_bar_magnifier resolves intrabar fills from lower-timeframe data rather
+// than assuming how price moved inside a bar. Without it, a bar that spans
+// both the stop and the target is resolved by assumption, and the assumption
+// is what manufactures fake edge.
+//
+// process_orders_on_close stays FALSE deliberately. A bot reacting to a bar
+// close cannot fill at that close — it fills at the next bar's open, a few
+// hundred milliseconds later. Setting it true would flatter every result.
+//
+// slippage is in ticks; SPY's tick is $0.01.
+
+strategy("CISD° — Powell RB (SPY strategy)", "CISD° SPY-S", overlay = true,
+     max_bars_back = 1000, max_boxes_count = 500, max_lines_count = 500,
+     max_labels_count = 500,
+     initial_capital        = 100000,
+     default_qty_type       = strategy.fixed,
+     default_qty_value      = 100,
+     commission_type        = strategy.commission.cash_per_order,
+     commission_value       = 1.0,
+     slippage               = 1,
+     use_bar_magnifier      = true,
+     calc_on_every_tick     = false,
+     process_orders_on_close = false)
+
+
+// ───────────────────────── PART B — append to the end ────────────────────
+
+gStrat   = "17 ▸ Strategy"
+useStrat = input.bool(true,  "Place orders on signals", group = gStrat)
+tgtMult  = input.float(2.0,  "Target (x displacement leg)", minval = 0.25, step = 0.25, group = gStrat)
+useWin   = input.bool(false, "Only enter inside a window", group = gStrat)
+entryWin = input.session("0930-1200", "  ▸ entry window", group = gStrat)
+flatWin  = input.session("0930-1155", "Hold only inside this window", group = gStrat)
+useFlat  = input.bool(true,  "Flat outside the hold window", group = gStrat)
+
+// The Pine's "sigma" levels are multiples of the displacement leg, not
+// standard deviations of anything. tgtMult is that multiple. Note the target
+// is measured from the block's EXTREME, not from entry, so a 2.0 multiple is
+// NOT a 2R trade — entry already sits some distance above the extreme.
+canEnter = useStrat and ((not useWin) or not na(time(timeframe.period, entryWin, tzNY)))
+
+if canEnter and longFlag and not na(barBestExt) and not na(barBestDisp)
+    legL = barBestDisp - barBestExt
+    if legL > 0
+        strategy.entry("CISD L", strategy.long)
+        strategy.exit("L exit", "CISD L", stop = barBestExt, limit = barBestExt + tgtMult * legL)
+
+if canEnter and shortFlag and not na(barBestExt) and not na(barBestDisp)
+    legS = barBestExt - barBestDisp
+    if legS > 0
+        strategy.entry("CISD S", strategy.short)
+        strategy.exit("S exit", "CISD S", stop = barBestExt, limit = barBestExt - tgtMult * legS)
+
+// Time stop. Without this a losing position is held until the stop or target
+// is touched, which can be days — not what an intraday bot does, and it makes
+// the drawdown figures meaningless.
+if useStrat and useFlat and strategy.position_size != 0 and na(time(timeframe.period, flatWin, tzNY))
+    strategy.close_all("time flat")
