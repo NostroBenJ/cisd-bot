@@ -46,6 +46,10 @@ class GradeInputs:
     tf_agreement: int
     in_lull: bool
     atr_value: float
+    # False when the feed carries no volume at all. Distinct from "volume was
+    # low": an absent column must not be scored as thin participation, which
+    # would silently reject every signal and read as "the model found nothing".
+    volume_available: bool = True
     vwap: float = math.nan
     gamma: GammaContext | None = None
 
@@ -154,7 +158,7 @@ def grade(
         res.add("timeframe", tf_bonus, f"{inp.timeframe}m block")
 
     # ── NEW: relative volume ────────────────────────────────────────────────
-    if cfg.use_volume:
+    if cfg.use_volume and inp.volume_available:
         if inp.rvol >= cfg.min_rvol:
             # Scaled so 1.2x earns a little and 3x earns the full weight,
             # capped -- a 20x volume spike is a news event, not 20x the edge.
@@ -214,6 +218,7 @@ def stack_count(
     cfg: Config,
     rvol: float = 1.0,
     at_vwap: bool = False,
+    volume_available: bool = True,
 ) -> int:
     """Count independent confluences. Port of `f_stackCount` plus the new ones.
 
@@ -230,7 +235,7 @@ def stack_count(
     n += 1 if (bias_bull is not None and bias_bull == bull) else 0
     n += 1 if smt_confirmed else 0
     n += 1 if setup_type != 0 else 0
-    if cfg.use_volume and rvol >= cfg.min_rvol:
+    if cfg.use_volume and volume_available and rvol >= cfg.min_rvol:
         n += 1
     if cfg.use_vwap and at_vwap:
         n += 1

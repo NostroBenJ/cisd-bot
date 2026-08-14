@@ -312,6 +312,10 @@ class CisdEngine:
         # the CHART timeframe. Infer it from the bars rather than assuming the
         # base is 1-minute: a 5-minute export makes 5 the chart timeframe.
         self._chart_tf = _modal_spacing_minutes(base_bars)
+        # A feed with no volume column at all must not be read as thin
+        # participation -- an absent column is not low participation, and
+        # scoring it as such silently rejects every signal.
+        self._has_volume = any(b.volume > 0 for b in base_bars)
         timeframes = self._timeframes()
         series = {tf: (base_bars if tf == 1 else resample(base_bars, tf)) for tf in timeframes}
         atrs = {tf: atr(series[tf], cfg.atr_length) for tf in timeframes}
@@ -443,9 +447,19 @@ class CisdEngine:
     # ── helpers ─────────────────────────────────────────────────────────────
 
     def _timeframes(self) -> list[int]:
+        """Timeframes to detect on, deduplicated.
+
+        `base_timeframe` is clamped up to the chart timeframe. Asking for
+        1-minute detection on 5-minute bars would resample to an identity copy
+        and then detect the same blocks twice under two different timeframe
+        labels -- which also defeats anti-stack, since that only compares
+        blocks sharing a timeframe."""
         tfs = list(self.cfg.rb_timeframes)
-        if self.cfg.base_timeframe and self.cfg.base_timeframe not in tfs:
-            tfs.insert(0, self.cfg.base_timeframe)
+        base = self.cfg.base_timeframe
+        if base:
+            base = max(base, getattr(self, "_chart_tf", base))
+            if base not in tfs:
+                tfs.insert(0, base)
         return sorted(set(t for t in tfs if t > 0))
 
     def _intake(
@@ -494,7 +508,7 @@ class CisdEngine:
             amdx_setup=amdx, setup_type=st, bias_bull=bias_bull,
             smt_confirmed=smt.confirmed(blk.bull, i), tf_agreement=agreement,
             in_lull=in_session(bar, cfg.lull_window), atr_value=atr_v,
-            vwap=vwap_v, gamma=self.gamma,
+            vwap=vwap_v, gamma=self.gamma, volume_available=self._has_volume,
         )
         result = grade(gi, cfg, dr, pools, fvgs, gaps)
 
@@ -693,7 +707,7 @@ class CisdEngine:
             amdx_setup=z.amdx, setup_type=st, bias_bull=bias_bull,
             smt_confirmed=smt_ok, tf_agreement=agreement,
             in_lull=in_session(bar, cfg.lull_window), atr_value=atr_v,
-            vwap=vwap_v, gamma=self.gamma,
+            vwap=vwap_v, gamma=self.gamma, volume_available=self._has_volume,
         )
         result = grade(gi, cfg, dr, pools, fvgs, gaps)
         g = cfg.grade_of(result.score)
@@ -715,7 +729,7 @@ class CisdEngine:
 
         stk = stack_count(
             z.bull, z.ce, near_open, in_amd, st, bias_bull, smt_ok,
-            dr, pools, fvgs, gaps, cfg, rvol_v, at_vwap,
+            dr, pools, fvgs, gaps, cfg, rvol_v, at_vwap, self._has_volume,
         )
         if cfg.use_stack_gate and stk < cfg.min_stack:
             self.stats.reject("stack_too_thin")
@@ -736,7 +750,7 @@ class CisdEngine:
                 self.stats.reject("not_reversal")
                 return None
 
-        if cfg.use_volume and rvol_v < cfg.min_rvol:
+        if cfg.use_volume and self._has_volume and rvol_v < cfg.min_rvol:
             self.stats.reject("thin_volume")
             return None
 
@@ -756,6 +770,8 @@ class CisdEngine:
             warnings.append("no dealer gamma snapshot")
         elif self.gamma.is_stale(bar.ts):
             warnings.append(f"gamma snapshot {self.gamma.age_seconds(bar.ts) // 60}m old")
+        if not self._has_volume:
+            warnings.append("feed carries no volume; volume terms disabled")
         if self.events.is_empty():
             warnings.append("no event calendar loaded; macro blackouts not enforced")
 
