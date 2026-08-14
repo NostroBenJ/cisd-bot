@@ -8,3 +8,5 @@ data/*.json
 data_store/
 .env
 *.log
+data/uw/
+data/uw_openapi.yaml
