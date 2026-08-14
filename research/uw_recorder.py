@@ -59,6 +59,17 @@ ENDPOINTS = {
     "interpolated_iv":  "/api/stock/{t}/interpolated-iv",
     "price_levels":     "/api/stock/{t}/option/stock-price-levels",
     "flow_per_strike":  "/api/stock/{t}/flow-per-strike-intraday",
+    # Price from the SAME source as the flow, so timestamps align without a
+    # cross-vendor join -- and unlike the TradingView export it carries volume.
+    "ohlc_1m":          "/api/stock/{t}/ohlc/1m",
+    "ohlc_5m":          "/api/stock/{t}/ohlc/5m",
+}
+
+# Endpoints needing more than `date`. The OHLC default page is small; a full
+# session of 1-minute bars including extended hours needs room for ~1,440.
+EXTRA_PARAMS = {
+    "ohlc_1m": {"limit": 2500},
+    "ohlc_5m": {"limit": 2500},
 }
 MARKET_ENDPOINTS = {
     "market_tide":      "/api/market/market-tide",
@@ -125,10 +136,11 @@ def capture_day(day: str, key: str, force: bool = False) -> dict[str, int]:
         if dest.exists() and not force:
             out[name] = -1          # already held
             continue
-        status, payload = fetch(path, key, date=day)
+        extra = EXTRA_PARAMS.get(name.split("_", 1)[-1], {})
+        status, payload = fetch(path, key, date=day, **extra)
         if status == "http429":
             time.sleep(5)
-            status, payload = fetch(path, key, date=day)
+            status, payload = fetch(path, key, date=day, **extra)
         if status == "ok" and _rows(payload) > 0:
             dest.parent.mkdir(parents=True, exist_ok=True)
             # Store RAW. Coercion happens at read time so a parsing bug can
