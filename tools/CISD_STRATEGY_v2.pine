@@ -1,0 +1,1645 @@
+// ==========================================================================
+//  STRATEGY BUILD v2 - generated, do not hand-edit.
+//  Fixes two artifacts in v1: a full-bar entry lag, and a time stop
+//  that flattened afternoon entries on the bar after they opened.
+// ==========================================================================
+//@version=6
+// ════════════════════════════════════════════════════════════════════════════
+//  C I S D °  —  Powell Rejection-Block Model · v29  (Powell-pure · hardened)
+//  CISD: sweep → displacement → close past the OPEN that initiated the opposing
+//   delivery SERIES (cisdMinRun=2), read on the chart TF beneath the HTF arrays.
+//  "Pauci sed electi"  —  few, but chosen
+// ════════════════════════════════════════════════════════════════════════════
+strategy("CISD° Powell RB SPY strategy v2", "CISD-S2", overlay = true, max_bars_back = 1000, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500, initial_capital = 100000, default_qty_type = strategy.fixed, default_qty_value = 100, commission_type = strategy.commission.cash_per_order, commission_value = 1.0, slippage = 1, use_bar_magnifier = true, calc_on_every_tick = false, process_orders_on_close = true)
+
+// █ 1 ▸ RB TIMEFRAMES
+gT        = "1 ▸ RB Timeframes"
+useRb1    = input.bool(true,  "RB TF 1", group = gT, inline = "r1")
+rbTf1     = input.timeframe("5",  "", group = gT, inline = "r1")
+useRb2    = input.bool(true,  "RB TF 2", group = gT, inline = "r2")
+rbTf2     = input.timeframe("15", "", group = gT, inline = "r2")
+useRb3    = input.bool(false, "RB TF 3", group = gT, inline = "r3")
+rbTf3     = input.timeframe("60", "", group = gT, inline = "r3")
+
+// █ 2 ▸ GRADE · QUOTA · TOP-DOWN BIAS
+gG        = "2 ▸ Grade / Quota / Bias"
+minDraw   = input.string("A", "Min grade to DRAW", options = ["A+","A","B"], group = gG)
+minSignal = input.string("A", "Min grade to SIGNAL", options = ["A+","A"], group = gG)
+maxSignals= input.int(6, "Max signals per session", minval = 1, maxval = 12, group = gG)
+biasTf    = input.timeframe("60", "Top-down CISD bias TF", options = ["15","60","240","D"], group = gG)
+cisdBiasLook = input.int(6, "Bias CISD lookback", minval = 2, maxval = 12, group = gG)
+reqBias   = input.bool(true, "Only signal WITH top-down bias", group = gG)
+
+// █ 3 ▸ PREMIUM / DISCOUNT
+gPD       = "3 ▸ Premium / Discount"
+eqBandPct = input.float(0.10, "Equilibrium band (% of range)", minval = 0.0, maxval = 0.3, step = 0.01, group = gPD)
+wPD       = input.float(22.0, "P/D grade weight", minval = 0.0, maxval = 35.0, step = 1.0, group = gPD)
+pdStrong  = input.float(0.55, "Strong-P/D threshold", minval = 0.3, maxval = 0.9, step = 0.05, group = gPD)
+drawPD    = input.bool(true, "Draw dealing range (H/EQ/L)", group = gPD)
+allowPdB  = input.bool(true, "Allow B-grade in deep P/D + confluence", group = gPD)
+
+// █ 4 ▸ INSTITUTIONAL ANCHOR
+gAn       = "4 ▸ Institutional Anchor"
+gateFvg   = input.bool(true, "Allow form: inside HTF FVG", group = gAn)
+gateKeyO  = input.bool(true, "Allow form: key-open + sweep", group = gAn)
+gatePd    = input.bool(true, "Allow form: deep P/D + sweep", group = gAn)
+gateIntrinsic = input.bool(true, "Allow form: any swing-sweep RB", group = gAn)
+proxMode  = input.string("ATR", "Key-open proximity", options = ["ATR","Points"], group = gAn)
+proxAtrM  = input.float(0.15, "  ▸ proximity ATR ×", minval = 0.02, step = 0.01, group = gAn)
+proxPts   = input.float(8.0,  "  ▸ proximity points", minval = 0.5, step = 0.5, group = gAn)
+
+// █ 5 ▸ KEY OPENS
+gK        = "5 ▸ Key Opens"
+tzNY      = input.string("America/New_York", "Exchange timezone", group = gK)
+useO0000  = input.bool(false, "00:00  Midnight EST", group = gK)
+useO0830  = input.bool(false, "08:30  Pre-market", group = gK)
+useO0930  = input.bool(true, "09:30  NY Open", group = gK)
+useO1000  = input.bool(true, "10:00  Macro", group = gK)
+useO1330  = input.bool(true, "13:30  PM", group = gK)
+useO1800  = input.bool(false, "18:00  Futures Open", group = gK)
+drawOpens = input.bool(true, "Draw key-open levels", group = gK)
+
+// █ 6 ▸ AMD
+gAMD      = "6 ▸ AMD / Manipulation Hunter"
+amdMode   = input.string("Soft", "AMD handling", options = ["Off","Soft","Hard"], group = gAMD)
+amdSess1  = input.session("0930-1100", "AMD window 1 (NY AM)", group = gAMD)
+amdSess2  = input.session("0200-0500", "AMD window 2 (London)", group = gAMD)
+useAMDX   = input.bool(true, "Hunt session manipulation (AMDX)", group = gAMD)
+amdxStrict= input.bool(false, "  ▸ Strict: ONLY manipulation setups", group = gAMD)
+huntAsia  = input.bool(false, "Asia killzone", group = gAMD, inline = "kzA")
+kzAsiaSess= input.session("2000-0000", "", group = gAMD, inline = "kzA")
+huntLon   = input.bool(false, "London killzone", group = gAMD, inline = "kzL")
+kzLonSess = input.session("0200-0500", "", group = gAMD, inline = "kzL")
+huntNY    = input.bool(true, "NY killzone", group = gAMD, inline = "kzN")
+kzNYSess  = input.session("0700-1100", "", group = gAMD, inline = "kzN")
+poolPD    = input.bool(true, "Hunt PDH/PDL sweeps", group = gAMD)
+poolHL    = input.bool(true, "Hunt HOD/LOD sweeps", group = gAMD)
+poolAsia  = input.bool(false, "Hunt Asia-range sweeps", group = gAMD)
+poolLon   = input.bool(false, "Hunt London-range sweeps", group = gAMD)
+poolNY    = input.bool(true, "Hunt NY-range sweeps", group = gAMD)
+amdxBoost = input.float(18.0, "Manipulation grade boost", minval = 0.0, maxval = 40.0, step = 1.0, group = gAMD)
+
+// █ 7 ▸ PXH / PXL
+gPow      = "7 ▸ PXH / PXL Session Liquidity"
+usePXH    = input.bool(true, "Track PXH/PXL", group = gPow)
+pxAsia    = input.bool(false, "Asian session", group = gPow, inline = "px1")
+pxAsiaSess= input.session("1800-0000", "", group = gPow, inline = "px1")
+pxLon     = input.bool(false, "London session", group = gPow, inline = "px2")
+pxLonSess = input.session("0300-0800", "", group = gPow, inline = "px2")
+pxNY      = input.bool(true, "NY session", group = gPow, inline = "px3")
+pxNYSess  = input.session("0930-1600", "", group = gPow, inline = "px3")
+drawPX    = input.bool(true, "Draw PXH/PXL levels", group = gPow)
+
+// █ 8 ▸ FORMATION FILTERS
+gF        = "8 ▸ Formation Filters"
+gateSweep = input.bool(true,  "Require min sweep distance", group = gF, inline = "sw")
+sweepMode = input.string("ATR", "", options = ["ATR","Points"], group = gF, inline = "sw")
+sweepAtrM = input.float(0.08, "  ▸ sweep ATR ×", minval = 0.0, step = 0.02, group = gF)
+sweepPts  = input.float(3.0,  "  ▸ sweep points", minval = 0.0, step = 0.5, group = gF)
+minBody   = input.float(0.45, "Min RB body fraction", minval = 0.1, maxval = 0.9, step = 0.05, group = gF)
+gateReclaim = input.bool(false, "Require reclaim of swept level", group = gF)
+gateDisp  = input.bool(true,  "Require displacement after RB", group = gF, inline = "dp")
+dispMode  = input.string("ATR", "", options = ["ATR","Points"], group = gF, inline = "dp")
+dispAtrM  = input.float(0.9,  "  ▸ displacement ATR ×", minval = 0.1, step = 0.1, group = gF)
+dispPts   = input.float(15.0, "  ▸ displacement points", minval = 0.5, step = 0.5, group = gF)
+dispWin   = input.int(24, "  ▸ displacement window (bars)", minval = 2, maxval = 100, group = gF)
+gateStack = input.bool(true,  "Anti-stack (one RB per level)", group = gF)
+
+// █ 9 ▸ RB DETECTION
+gD        = "9 ▸ RB Detection"
+swingLook = input.int(10, "Sweep swing lookback", minval = 3, maxval = 40, group = gD)
+reqStrong = input.bool(true, "Require strong close", group = gD)
+strongPct = input.float(0.45, "  ▸ Close in top/bottom % of range", minval = 0.10, maxval = 0.95, step = 0.05, group = gD)
+atrLen    = input.int(14, "ATR length", minval = 2, group = gD)
+maxLegBars= input.int(60, "Max bars before RB retires", minval = 10, maxval = 300, group = gD)
+maxRbs    = input.int(50, "Max live RBs tracked", minval = 20, maxval = 60, group = gD)
+
+// █ 10 ▸ INVALIDATION
+gI        = "10 ▸ Invalidation"
+invalBuf  = input.float(0.0, "Invalidation buffer (pts)", minval = 0.0, step = 0.5, group = gI)
+
+// █ 11 ▸ AOI / HTF FVG
+gA        = "11 ▸ AOI / HTF FVG"
+htfFvgTf  = input.timeframe("60", "HTF FVG timeframe", options = ["15","30","60","240","D"], group = gA)
+fvgMinPts = input.float(0.5, "Min HTF FVG size (pts)", minval = 0.0, step = 0.1, group = gA)
+fvgMaxShow= input.int(6, "Max HTF FVGs shown (nearest)", minval = 1, maxval = 20, group = gA)
+fvgSepPct = input.float(0.65, "FVG separation (hide overlap ≥ %)", minval = 0.0, maxval = 1.0, step = 0.05, group = gA)
+fvgStaleAtr = input.float(8.0, "Drop FVG beyond ATR ×", minval = 1.0, step = 0.5, group = gA)
+drawFvg   = input.bool(true, "Draw HTF FVGs", group = gA)
+useOB     = input.bool(true, "Include order block in AOI (FVG-in-OB)", group = gA)
+
+// █ 11b ▸ OPENING GAPS
+gOG       = "11b ▸ Opening Gaps"
+useGaps   = input.bool(true, "Track opening gaps", group = gOG)
+useNDOG   = input.bool(false, "  ▸ NDOG (new day 17→18)", group = gOG)
+useNWOG   = input.bool(false, "  ▸ NWOG (new week)", group = gOG)
+useOPG    = input.bool(true, "  ▸ OPG (RTH open gap)", group = gOG)
+gapAnchor = input.bool(true, "Gap CE as RB formation anchor", group = gOG)
+gapMinPts = input.float(0.3, "Min gap size (pts)", minval = 0.0, step = 0.1, group = gOG)
+drawGaps  = input.bool(true, "Draw gaps + CE", group = gOG)
+gapHist   = input.int(2, "Gaps kept per type", minval = 1, maxval = 10, group = gOG)
+gapStaleAtr = input.float(10.0, "Drop gap beyond ATR ×", minval = 1.0, step = 0.5, group = gOG)
+
+// █ 12 ▸ LIQUIDITY
+gL        = "12 ▸ Liquidity"
+usePdSwp  = input.bool(true, "Score PDH/PDL sweeps", group = gL)
+useSsSwp  = input.bool(true, "Score London/NY sweeps", group = gL)
+lonSess   = input.session("0300-1100", "London", group = gL)
+nySess    = input.session("0930-1600", "New York", group = gL)
+sweepLook = input.int(12, "Sweep recency (bars)", minval = 1, group = gL)
+
+// █ 12b ▸ SMT DIVERGENCE
+gSMT      = "12b ▸ SMT Divergence"
+useSMT    = input.bool(true, "Use SMT divergence", group = gSMT)
+smtSym1   = input.string("QQQ", "Correlated asset 1", group = gSMT)
+smtSym2   = input.string("DIA", "Correlated asset 2 (optional)", group = gSMT)
+smtUse2   = input.bool(true, "Use 2nd peer", group = gSMT)
+smtPiv    = input.int(5, "SMT swing strength", minval = 2, maxval = 15, group = gSMT)
+smtReq    = input.bool(false, "REQUIRE SMT to signal", group = gSMT)
+
+// █ 12c ▸ CONFLUENCE STACK
+gCS       = "12c ▸ Confluence Stack"
+useStack  = input.bool(true, "Gate signals by confluence count", group = gCS)
+minStack  = input.int(3, "Min confluences to signal", minval = 1, maxval = 8, group = gCS)
+showStack = input.bool(true, "Show stack count on RB tag", group = gCS)
+
+// █ 12d ▸ DRAW ON LIQUIDITY
+gDOL      = "12d ▸ Draw on Liquidity"
+useDOL    = input.bool(true, "Classify setups by draw (DOL)", group = gDOL)
+dolMode   = input.string("Both", "Signal which setup types", options = ["Both","Continuation only","Reversal only","Tag only (no gate)"], group = gDOL)
+dolBandAtr= input.float(0.5, "Draw proximity (ATR ×)", minval = 0.1, maxval = 3.0, step = 0.1, group = gDOL)
+wDolCont  = input.float(8.0,  "Continuation grade boost", minval = 0.0, maxval = 25.0, step = 1.0, group = gDOL)
+wDolRev   = input.float(14.0, "Reversal (terminal) grade boost", minval = 0.0, maxval = 30.0, step = 1.0, group = gDOL)
+drawDOL   = input.bool(true, "Draw DOL target line", group = gDOL)
+dolCol    = input.color(#26c6da, "DOL target color", group = gDOL)
+
+// █ 12e ▸ STD-DEV PROJECTIONS
+gSD       = "12e ▸ Std-Dev Projections"
+useStdDev = input.bool(true, "Project std-dev targets on signal", group = gSD)
+sdL1      = input.float(2.0, "Level 1 (σ)", minval = 0.5, step = 0.5, group = gSD)
+sdL2      = input.float(2.5, "Level 2 (σ)", minval = 0.5, step = 0.5, group = gSD)
+sdL3      = input.float(4.0, "Level 3 (σ) — max expansion", minval = 0.5, step = 0.5, group = gSD)
+sdCol     = input.color(#80deea, "Projection color", group = gSD)
+
+// █ 13 ▸ OTE
+gO        = "13 ▸ OTE"
+showOTE   = input.bool(false, "Show OTE on displacement leg", group = gO)
+ote1      = input.float(0.62,  "OTE level 1", step = 0.001, group = gO)
+ote2      = input.float(0.705, "OTE optimal", step = 0.001, group = gO)
+ote3      = input.float(0.79,  "OTE level 3", step = 0.001, group = gO)
+
+// █ 14 ▸ CISD ENTRY TRIGGER
+gC        = "14 ▸ CISD Trigger"
+useCisdTrig = input.bool(true, "CISD-close entry trigger", group = gC)
+cisdLook  = input.int(4, "CISD delivery-run lookback", minval = 2, maxval = 8, group = gC)
+cisdMinRun = input.int(2, "Min opposing candles (Powell series)", minval = 1, maxval = 4, group = gC)
+
+// █ 15 ▸ GRADE WEIGHTS
+gW        = "15 ▸ Grade Weights"
+wSweep    = input.float(16.0, "Engineered-liquidity sweep", minval = 0.0, maxval = 30.0, step = 1.0, group = gW)
+wFvg      = input.float(14.0, "HTF FVG (PD array)", minval = 0.0, maxval = 30.0, step = 1.0, group = gW)
+wGap      = input.float(12.0, "Opening gap (CE/zone)", minval = 0.0, maxval = 30.0, step = 1.0, group = gW)
+wSMT      = input.float(12.0, "SMT divergence confirm", minval = 0.0, maxval = 30.0, step = 1.0, group = gW)
+wOpen     = input.float(10.0, "Key open proximity", minval = 0.0, maxval = 25.0, step = 1.0, group = gW)
+wAmd      = input.float(8.0,  "AMD window", minval = 0.0, maxval = 20.0, step = 1.0, group = gW)
+wBias     = input.float(8.0,  "Top-down CISD bias aligned", minval = 0.0, maxval = 20.0, step = 1.0, group = gW)
+wDisp     = input.float(8.0,  "Displacement strong", minval = 0.0, maxval = 20.0, step = 1.0, group = gW)
+
+// █ 16 ▸ STYLE
+gV        = "16 ▸ Style"
+bullCol   = input.color(#26a69a, "Bullish RB", group = gV, inline = "c")
+bearCol   = input.color(#ef5350, "Bearish RB", group = gV, inline = "c")
+ceCol     = input.color(#d7b3ff, "CE", group = gV, inline = "c2")
+fvgCol    = input.color(#5c9eff, "HTF FVG", group = gV, inline = "c2")
+oteCol    = input.color(#c9a227, "OTE", group = gV, inline = "c3")
+openCol   = input.color(#8892a0, "Key opens", group = gV, inline = "c3")
+pdColr    = input.color(#4a5568, "Dealing range", group = gV, inline = "c4")
+starCol   = input.color(#b07cff, "Strong-P/D ★", group = gV, inline = "c4")
+cisdCol   = input.color(#ffb74d, "CISD level", group = gV, inline = "c5")
+gapCol    = input.color(#7e57c2, "Opening gap", group = gV, inline = "c6")
+gapCeCol  = input.color(#b39ddb, "Gap CE", group = gV, inline = "c6")
+showCisd  = input.bool(true, "Draw CISD level line", group = gV, inline = "c5")
+fillTransp= input.int(82, "Zone transparency", minval = 65, maxval = 95, group = gV)
+showTag   = input.bool(true, "Show grade tag on RB", group = gV)
+chartDensity = input.string("Balanced", "Chart density", options = ["Minimal","Balanced","Full"], group = gV)
+showDash  = input.bool(true, "Show dashboard", group = gV)
+dashPosStr= input.string("Top Right", "Dashboard position", options = ["Top Right","Top Left","Bottom Right","Bottom Left"], group = gV)
+gDash     = "16b ▸ Dashboard Rows"
+dRowSignals = input.bool(true,  "Signals quota", group = gDash)
+dRowPd      = input.bool(true,  "Premium/Discount", group = gDash)
+dRowBias    = input.bool(true,  "Top-down bias", group = gDash)
+dRowDol     = input.bool(true,  "Draw on liquidity", group = gDash)
+dRowAmdx    = input.bool(true,  "AMDX manipulation", group = gDash)
+dRowStack   = input.bool(true,  "Confluence stack", group = gDash)
+dRowSmt     = input.bool(true,  "SMT divergence", group = gDash)
+dRowMmxm    = input.bool(true,  "MMXM phase", group = gDash)
+dRowGrades  = input.bool(true,  "Live grade counts (A+/A/untapped)", group = gDash)
+dRowRbTf    = input.bool(false, "Live RB count per timeframe (debug)", group = gDash)
+dRowCisd    = input.bool(false, "CISD trigger state", group = gDash)
+dRowFvg     = input.bool(false, "HTF FVG count", group = gDash)
+dRowGaps    = input.bool(false, "Opening-gap count", group = gDash)
+dRowAmd     = input.bool(false, "AMD window state", group = gDash)
+dRowPend    = input.bool(false, "Pending-displacement count", group = gDash)
+
+// ── HELPERS + CONTEXT ──
+dashPos = dashPosStr == "Top Left" ? position.top_left : dashPosStr == "Bottom Right" ? position.bottom_right : dashPosStr == "Bottom Left" ? position.bottom_left : position.top_right
+densMin  = chartDensity == "Minimal"
+densFull = chartDensity == "Full"
+eDrawOte   = showOTE and densFull
+eDrawFvg   = drawFvg and not densMin
+eDrawGaps  = drawGaps and not densMin
+eDrawPX    = drawPX and not densMin
+eDrawOpens = drawOpens and not densMin
+hdrBg = color.new(#0b0e14, 0)
+rowBg = color.new(#11161f, 0)
+accent = #58a6ff
+mutCol = color.new(#6e7681, 0)
+extendMs = timeframe.in_seconds() * 1000.0 * 30
+cisdStubMs = timeframe.in_seconds() * 1000.0 * 10
+atrChart = ta.atr(atrLen)
+rng20 = ta.highest(high, 20) - ta.lowest(low, 20)
+sweepUseAtr = sweepMode == "ATR"
+dispUseAtr  = dispMode == "ATR"
+proxUseAtr  = proxMode == "ATR"
+
+chartTfSec = math.max(1, timeframe.in_seconds())
+f_rbBars(simple string tf) =>
+    s = timeframe.in_seconds(tf)
+    int(math.max(1, math.round(nz(s, chartTfSec) / chartTfSec)))
+f_rbGte(simple string tf) =>
+    nz(timeframe.in_seconds(tf), chartTfSec) >= chartTfSec
+rbBars1 = f_rbBars(rbTf1)
+rbBars2 = f_rbBars(rbTf2)
+rbBars3 = f_rbBars(rbTf3)
+rbOk1 = f_rbGte(rbTf1)
+rbOk2 = f_rbGte(rbTf2)
+rbOk3 = f_rbGte(rbTf3)
+
+drawCap = 900
+f_clampX(int x) => math.max(nz(x, bar_index), bar_index - drawCap)
+
+gradeOf(float s)    => s >= 80 ? "A+" : s >= 66 ? "A" : s >= 52 ? "B" : "C"
+gradeRank(string g) => g == "A+" ? 4 : g == "A" ? 3 : g == "B" ? 2 : 1
+gradeColr(float s)  => s >= 80 ? #00e676 : s >= 66 ? #66bb6a : s >= 52 ? #ffa726 : #6e7681
+minDrawRank = gradeRank(minDraw)
+minSigRank  = gradeRank(minSignal)
+
+inAmd     = amdMode != "Off" and ((not na(time(timeframe.period, amdSess1, tzNY))) or (not na(time(timeframe.period, amdSess2, tzNY))))
+amdSoftIn = amdMode == "Soft" and inAmd
+amdHardBlock = amdMode == "Hard" and not inAmd
+
+f_cisdState(int look) =>
+    float dOpen = na
+    int  dLen = 0
+    bool dRun = false
+    bool dStop = false
+    for k = 1 to look
+        isB = close[k] < open[k]
+        if not dStop
+            if isB
+                dRun := true
+                dOpen := open[k]
+                dLen += 1
+            else if dRun
+                dStop := true
+    float uOpen = na
+    int  uLen = 0
+    bool uRun = false
+    bool uStop = false
+    for k = 1 to look
+        isU = close[k] > open[k]
+        if not uStop
+            if isU
+                uRun := true
+                uOpen := open[k]
+                uLen += 1
+            else if uRun
+                uStop := true
+    var int dir = 0
+    if not na(dOpen) and dLen >= cisdMinRun and close > dOpen
+        dir := 1
+    if not na(uOpen) and uLen >= cisdMinRun and close < uOpen
+        dir := -1
+    dir
+biasDir  = request.security(syminfo.tickerid, biasTf, f_cisdState(cisdBiasLook), lookahead = barmerge.lookahead_off)
+biasBull = biasDir >= 0
+
+f_cisdClose(bool bull, int look) =>
+    bool fired = false
+    float lvl = na
+    int  runLen = 0
+    bool run = false
+    bool stop = false
+    if bull
+        for k = 1 to look
+            isB = close[k] < open[k]
+            if not stop
+                if isB
+                    run := true
+                    lvl := open[k]
+                    runLen += 1
+                else if run
+                    stop := true
+        fired := not na(lvl) and runLen >= cisdMinRun and close > lvl
+    else
+        for k = 1 to look
+            isU = close[k] > open[k]
+            if not stop
+                if isU
+                    run := true
+                    lvl := open[k]
+                    runLen += 1
+                else if run
+                    stop := true
+        fired := not na(lvl) and runLen >= cisdMinRun and close < lvl
+    fired
+
+// ── KEY OPENS ──
+f_atOpen(bool en, string win) =>
+    en and (not na(time(timeframe.period, win, tzNY))) and na(time(timeframe.period, win, tzNY)[1])
+var float o0000 = na, var int x0000 = na
+var float o0830 = na, var int x0830 = na
+var float o0930 = na, var int x0930 = na
+var float o1000 = na, var int x1000 = na
+var float o1330 = na, var int x1330 = na
+var float o1800 = na, var int x1800 = na
+if f_atOpen(useO0000, "0000-0001")
+    o0000 := open
+    x0000 := bar_index
+if f_atOpen(useO0830, "0830-0831")
+    o0830 := open
+    x0830 := bar_index
+if f_atOpen(useO0930, "0930-0931")
+    o0930 := open
+    x0930 := bar_index
+if f_atOpen(useO1000, "1000-1001")
+    o1000 := open
+    x1000 := bar_index
+if f_atOpen(useO1330, "1330-1331")
+    o1330 := open
+    x1330 := bar_index
+if f_atOpen(useO1800, "1800-1801")
+    o1800 := open
+    x1800 := bar_index
+
+f_nearOpen(float px, float dist) =>
+    bool ok = false
+    if useO0000 and not na(o0000) and math.abs(px - o0000) <= dist
+        ok := true
+    if useO0830 and not na(o0830) and math.abs(px - o0830) <= dist
+        ok := true
+    if useO0930 and not na(o0930) and math.abs(px - o0930) <= dist
+        ok := true
+    if useO1000 and not na(o1000) and math.abs(px - o1000) <= dist
+        ok := true
+    if useO1330 and not na(o1330) and math.abs(px - o1330) <= dist
+        ok := true
+    if useO1800 and not na(o1800) and math.abs(px - o1800) <= dist
+        ok := true
+    ok
+
+// ── PREMIUM / DISCOUNT ──
+pdh = request.security(syminfo.tickerid, "D", high[1], lookahead = barmerge.lookahead_off)
+pdl = request.security(syminfo.tickerid, "D", low[1],  lookahead = barmerge.lookahead_off)
+pwh = request.security(syminfo.tickerid, "W", high[1], lookahead = barmerge.lookahead_off)
+pwl = request.security(syminfo.tickerid, "W", low[1],  lookahead = barmerge.lookahead_off)
+pdEq    = (pdh + pdl) / 2.0
+pdRange = pdh - pdl
+eqBand  = pdRange * eqBandPct
+pwEq    = (pwh + pwl) / 2.0
+pwRange = pwh - pwl
+
+f_favPd(float px, bool bull) => not na(pdEq) and (bull ? px < pdEq - eqBand : px > pdEq + eqBand)
+f_pdDepth(float px, bool bull) =>
+    dD = (not na(pdRange) and pdRange > 0) ? math.min(math.max((bull ? pdEq - px : px - pdEq) / (pdRange / 2.0), 0), 1) : 0.0
+    wD = (not na(pwRange) and pwRange > 0) ? math.min(math.max((bull ? pwEq - px : px - pwEq) / (pwRange / 2.0), 0), 1) : 0.0
+    blended = dD * 0.65 + wD * 0.35
+    math.pow(blended, 1.5)
+f_deepDualPd(float px, bool bull) =>
+    dD = (not na(pdRange) and pdRange > 0) ? (bull ? pdEq - px : px - pdEq) / (pdRange / 2.0) : 0.0
+    wD = (not na(pwRange) and pwRange > 0) ? (bull ? pwEq - px : px - pwEq) / (pwRange / 2.0) : 0.0
+    dD > 0.45 and wD > 0.45
+
+inDiscount = not na(pdEq) and close < pdEq - eqBand
+inPremium  = not na(pdEq) and close > pdEq + eqBand
+inEq       = not inDiscount and not inPremium
+
+newDay = ta.change(time("D")) != 0
+var int dayStartX = na
+if newDay
+    dayStartX := bar_index
+recentPdHi = usePdSwp and not na(pdh) and ta.highest(high, sweepLook) > pdh and close < pdh
+recentPdLo = usePdSwp and not na(pdl) and ta.lowest(low, sweepLook) < pdl and close > pdl
+
+inLon = not na(time(timeframe.period, lonSess, tzNY))
+inNY  = not na(time(timeframe.period, nySess, tzNY))
+lonEnd = not inLon and inLon[1]
+nyEnd = not inNY and inNY[1]
+lonStart = inLon and not inLon[1]
+nyStart = inNY and not inNY[1]
+var float lonHi=na, var float lonLo=na, var float nyHi=na, var float nyLo=na
+var float lonHiF=na, var float lonLoF=na, var float nyHiF=na, var float nyLoF=na
+if lonStart
+    lonHi := high
+    lonLo := low
+else if inLon
+    lonHi := math.max(nz(lonHi, high), high)
+    lonLo := math.min(nz(lonLo, low),  low)
+if lonEnd
+    lonHiF := lonHi
+    lonLoF := lonLo
+if nyStart
+    nyHi := high
+    nyLo := low
+else if inNY
+    nyHi := math.max(nz(nyHi, high), high)
+    nyLo := math.min(nz(nyLo, low),  low)
+if nyEnd
+    nyHiF := nyHi
+    nyLoF := nyLo
+recentSsHi = useSsSwp and ((not na(lonHiF) and ta.highest(high, sweepLook) > lonHiF and close < lonHiF) or (not na(nyHiF) and ta.highest(high, sweepLook) > nyHiF and close < nyHiF))
+recentSsLo = useSsSwp and ((not na(lonLoF) and ta.lowest(low, sweepLook) < lonLoF and close > lonLoF) or (not na(nyLoF) and ta.lowest(low, sweepLook) < nyLoF and close > nyLoF))
+
+f_inSess(string s) => na(time(timeframe.period, s, tzNY)) ? false : true
+var float asiaH=na, var float asiaL=na, var int asiaX=na, var bool asiaDone=false
+var float lonH2=na, var float lonL2=na, var int lonX=na,  var bool lonDone=false
+var float nyH2=na,  var float nyL2=na,  var int nyX=na,   var bool nyDone=false
+inAsia = pxAsia and f_inSess(pxAsiaSess)
+inLonP = pxLon  and f_inSess(pxLonSess)
+inNYP  = pxNY   and f_inSess(pxNYSess)
+dayFlip = newDay
+if dayFlip
+    asiaDone := false
+    lonDone := false
+    nyDone := false
+if inAsia and not inAsia[1]
+    asiaH := high
+    asiaL := low
+    asiaX := bar_index
+else if inAsia
+    asiaH := math.max(nz(asiaH, high), high)
+    asiaL := math.min(nz(asiaL, low), low)
+if not inAsia and inAsia[1]
+    asiaDone := true
+if inLonP and not inLonP[1]
+    lonH2 := high
+    lonL2 := low
+    lonX := bar_index
+else if inLonP
+    lonH2 := math.max(nz(lonH2, high), high)
+    lonL2 := math.min(nz(lonL2, low), low)
+if not inLonP and inLonP[1]
+    lonDone := true
+if inNYP and not inNYP[1]
+    nyH2 := high
+    nyL2 := low
+    nyX := bar_index
+else if inNYP
+    nyH2 := math.max(nz(nyH2, high), high)
+    nyL2 := math.min(nz(nyL2, low), low)
+if not inNYP and inNYP[1]
+    nyDone := true
+
+recentPxHi = usePXH and ((not na(asiaH) and ta.highest(high, sweepLook) > asiaH and close < asiaH) or (not na(lonH2) and ta.highest(high, sweepLook) > lonH2 and close < lonH2) or (not na(nyH2) and ta.highest(high, sweepLook) > nyH2 and close < nyH2))
+recentPxLo = usePXH and ((not na(asiaL) and ta.lowest(low, sweepLook) < asiaL and close > asiaL) or (not na(lonL2) and ta.lowest(low, sweepLook) < lonL2 and close > lonL2) or (not na(nyL2) and ta.lowest(low, sweepLook) < nyL2 and close > nyL2))
+sweepBull = recentPdLo or recentSsLo or recentPxLo
+sweepBear = recentPdHi or recentSsHi or recentPxHi
+
+// ── MULTI-SESSION MANIPULATION HUNTER ──
+inKZAsia = huntAsia and f_inSess(kzAsiaSess)
+inKZLon  = huntLon  and f_inSess(kzLonSess)
+inKZNY   = huntNY   and f_inSess(kzNYSess)
+inAnyKZ  = inKZAsia or inKZLon or inKZNY
+var float hodv = na, var float lodv = na
+hodPrev = hodv
+lodPrev = lodv
+if dayFlip
+    hodv := high
+    lodv := low
+else
+    hodv := math.max(nz(hodv, high), high)
+    lodv := math.min(nz(lodv, low), low)
+var float hodRaid = na, var float lodRaid = na
+if dayFlip
+    hodRaid := na
+    lodRaid := na
+if high > hodPrev
+    hodRaid := hodPrev
+if low < lodPrev
+    lodRaid := lodPrev
+hodSwept = poolHL and not na(hodRaid) and close < hodRaid
+lodSwept = poolHL and not na(lodRaid) and close > lodRaid
+if hodSwept
+    hodRaid := na
+if lodSwept
+    lodRaid := na
+manipBear = useAMDX and inAnyKZ and ((poolPD and not na(pdh) and high > pdh and close < pdh) or hodSwept or (poolAsia and asiaDone and not na(asiaH) and high > asiaH and close < asiaH) or (poolLon and lonDone and not na(lonH2) and high > lonH2 and close < lonH2) or (poolNY and nyDone and not na(nyH2) and high > nyH2 and close < nyH2))
+manipBull = useAMDX and inAnyKZ and ((poolPD and not na(pdl) and low < pdl and close > pdl) or lodSwept or (poolAsia and asiaDone and not na(asiaL) and low < asiaL and close > asiaL) or (poolLon and lonDone and not na(lonL2) and low < lonL2 and close > lonL2) or (poolNY and nyDone and not na(nyL2) and low < nyL2 and close > nyL2))
+recentAmdxBear = ta.barssince(manipBear) <= sweepLook
+recentAmdxBull = ta.barssince(manipBull) <= sweepLook
+f_amdxSetup(bool bull) => useAMDX and (bull ? recentAmdxBull : recentAmdxBear)
+kzName = inKZNY ? "NY" : inKZLon ? "Lon" : inKZAsia ? "Asia" : "—"
+
+// ── DRAW ON LIQUIDITY ──
+f_minAbove(float px, float a, float b, float c, float d, float e) =>
+    float r = na
+    if not na(a) and a > px
+        r := na(r) ? a : math.min(r, a)
+    if not na(b) and b > px
+        r := na(r) ? b : math.min(r, b)
+    if not na(c) and c > px
+        r := na(r) ? c : math.min(r, c)
+    if not na(d) and d > px
+        r := na(r) ? d : math.min(r, d)
+    if not na(e) and e > px
+        r := na(r) ? e : math.min(r, e)
+    r
+f_maxBelow(float px, float a, float b, float c, float d, float e) =>
+    float r = na
+    if not na(a) and a < px
+        r := na(r) ? a : math.max(r, a)
+    if not na(b) and b < px
+        r := na(r) ? b : math.max(r, b)
+    if not na(c) and c < px
+        r := na(r) ? c : math.max(r, c)
+    if not na(d) and d < px
+        r := na(r) ? d : math.max(r, d)
+    if not na(e) and e < px
+        r := na(r) ? e : math.max(r, e)
+    r
+asiaHd = asiaDone ? asiaH : na
+asiaLd = asiaDone ? asiaL : na
+lonHd  = lonDone  ? lonH2 : na
+lonLd  = lonDone  ? lonL2 : na
+nyHd   = nyDone   ? nyH2  : na
+nyLd   = nyDone   ? nyL2  : na
+dolUp = useDOL ? f_minAbove(close, pdh, pwh, asiaHd, lonHd, nyHd) : na
+dolDn = useDOL ? f_maxBelow(close, pdl, pwl, asiaLd, lonLd, nyLd) : na
+dolDirNow = biasBull ? 1 : -1
+dolCand   = biasBull ? dolUp : dolDn
+var float dolPrice = na
+var int   dolDir   = 0
+if barstate.isconfirmed
+    reachedDol = not na(dolPrice) and (dolDir > 0 ? high >= dolPrice : low <= dolPrice)
+    flipDol    = dolDir != 0 and dolDir != dolDirNow
+    if (na(dolPrice) or reachedDol or flipDol) and not na(dolCand)
+        dolPrice := dolCand
+        dolDir   := dolDirNow
+dolBand  = atrChart * dolBandAtr
+f_setupType(bool bull, float ce, float ext) =>
+    int t = 0
+    if useDOL
+        atUpDraw = not na(dolUp) and ext >= dolUp - dolBand
+        atDnDraw = not na(dolDn) and ext <= dolDn + dolBand
+        if (not bull) and atUpDraw
+            t := 2
+        else if bull and atDnDraw
+            t := 2
+        else if bull and biasBull and f_favPd(ce, true)
+            t := 1
+        else if (not bull) and (not biasBull) and f_favPd(ce, false)
+            t := 1
+    t
+
+// ── OPENING GAPS ──
+var array<float> gT_  = array.new<float>()
+var array<float> gB_  = array.new<float>()
+var array<float> gCE_ = array.new<float>()
+var array<int>   gX_  = array.new<int>()
+var array<int>   gTy_ = array.new<int>()
+var array<box>   gBx_ = array.new<box>()
+var array<line>  gCl_ = array.new<line>()
+var array<label> gLb_ = array.new<label>()
+var array<int>   gHit_ = array.new<int>()
+
+f_pushGap(float a, float b, int ty) =>
+    hi = math.max(a, b)
+    lo = math.min(a, b)
+    if (hi - lo) >= gapMinPts
+        array.push(gT_, hi)
+        array.push(gB_, lo)
+        array.push(gCE_, (hi + lo) / 2.0)
+        array.push(gX_, bar_index)
+        array.push(gTy_, ty)
+        array.push(gBx_, na)
+        array.push(gCl_, na)
+        array.push(gLb_, na)
+        array.push(gHit_, 0)
+    true
+
+isOpen1800 = not na(time(timeframe.period, "1800-1801", tzNY)) and na(time(timeframe.period, "1800-1801", tzNY)[1])
+isOpen0930 = not na(time(timeframe.period, "0930-0931", tzNY)) and na(time(timeframe.period, "0930-0931", tzNY)[1])
+isSunday   = dayofweek(time, tzNY) == dayofweek.sunday
+if barstate.isconfirmed and useGaps and isOpen1800
+    pc = close[1]
+    po = open
+    isNwog = isSunday and useNWOG
+    if isNwog
+        f_pushGap(pc, po, 1)
+    else if useNDOG
+        f_pushGap(pc, po, 0)
+if barstate.isconfirmed and useGaps and isOpen0930 and useOPG
+    f_pushGap(close[1], open, 2)
+var array<int> gRm = array.new<int>()
+if barstate.isconfirmed and array.size(gT_) > 0
+    array.clear(gRm)
+    gStale = atrChart * gapStaleAtr
+    for i = 0 to array.size(gT_) - 1
+        ft = array.get(gT_, i)
+        fb = array.get(gB_, i)
+        ce = array.get(gCE_, i)
+        ty = array.get(gTy_, i)
+        h  = array.get(gHit_, i)
+        topHit = high >= ft or h == 1 or h == 3
+        botHit = low  <= fb or h == 2 or h == 3
+        h := (topHit and botHit) ? 3 : topHit ? 1 : botHit ? 2 : 0
+        array.set(gHit_, i, h)
+        filled = h == 3
+        stale  = ty != 1 and math.abs(close - ce) > gStale
+        if filled or stale
+            array.push(gRm, i)
+    for ty = 0 to 2
+        cnt = 0
+        for i = 0 to array.size(gTy_) - 1
+            if array.get(gTy_, i) == ty
+                cnt += 1
+        excess = cnt - gapHist
+        if excess > 0
+            marked = 0
+            for i = 0 to array.size(gTy_) - 1
+                if marked < excess and array.get(gTy_, i) == ty and not array.includes(gRm, i)
+                    array.push(gRm, i)
+                    marked += 1
+    if array.size(gRm) > 0
+        array.sort(gRm, order.descending)
+        for k = 0 to array.size(gRm) - 1
+            idx = array.get(gRm, k)
+            if idx >= 0 and idx < array.size(gT_)
+                bx = array.get(gBx_, idx)
+                cl = array.get(gCl_, idx)
+                lb = array.get(gLb_, idx)
+                if not na(bx)
+                    box.delete(bx)
+                if not na(cl)
+                    line.delete(cl)
+                if not na(lb)
+                    label.delete(lb)
+                array.remove(gT_, idx)
+                array.remove(gB_, idx)
+                array.remove(gCE_, idx)
+                array.remove(gX_, idx)
+                array.remove(gTy_, idx)
+                array.remove(gBx_, idx)
+                array.remove(gCl_, idx)
+                array.remove(gLb_, idx)
+                array.remove(gHit_, idx)
+
+f_inGap(float px) =>
+    bool ok = false
+    if useGaps and array.size(gT_) > 0
+        band = atrChart * 0.15
+        for i = 0 to array.size(gT_) - 1
+            if (px <= array.get(gT_, i) and px >= array.get(gB_, i)) or math.abs(px - array.get(gCE_, i)) <= band
+                ok := true
+    ok
+
+// ── SMT DIVERGENCE ──
+useP1 = useSMT and str.length(str.tostring(smtSym1)) > 0
+useP2 = useSMT and smtUse2 and str.length(str.tostring(smtSym2)) > 0
+sym1 = useP1 ? smtSym1 : syminfo.tickerid
+sym2 = useP2 ? smtSym2 : syminfo.tickerid
+peer1H = request.security(sym1, timeframe.period, high, lookahead = barmerge.lookahead_off, ignore_invalid_symbol = true)
+peer1L = request.security(sym1, timeframe.period, low,  lookahead = barmerge.lookahead_off, ignore_invalid_symbol = true)
+peer2H = request.security(sym2, timeframe.period, high, lookahead = barmerge.lookahead_off, ignore_invalid_symbol = true)
+peer2L = request.security(sym2, timeframe.period, low,  lookahead = barmerge.lookahead_off, ignore_invalid_symbol = true)
+
+phH = ta.pivothigh(high, smtPiv, smtPiv)
+phL = ta.pivotlow(low, smtPiv, smtPiv)
+var float meHi1=na, var float meHi2=na, var float p1Hi1=na, var float p1Hi2=na, var float p2Hi1=na, var float p2Hi2=na
+var float meLo1=na, var float meLo2=na, var float p1Lo1=na, var float p1Lo2=na, var float p2Lo1=na, var float p2Lo2=na
+if not na(phH)
+    meHi2 := meHi1
+    meHi1 := high[smtPiv]
+    p1Hi2 := p1Hi1
+    p1Hi1 := peer1H[smtPiv]
+    p2Hi2 := p2Hi1
+    p2Hi1 := peer2H[smtPiv]
+if not na(phL)
+    meLo2 := meLo1
+    meLo1 := low[smtPiv]
+    p1Lo2 := p1Lo1
+    p1Lo1 := peer1L[smtPiv]
+    p2Lo2 := p2Lo1
+    p2Lo1 := peer2L[smtPiv]
+
+f_smtBear() =>
+    bool d1 = useP1 and not na(meHi1) and not na(meHi2) and not na(p1Hi1) and not na(p1Hi2) and meHi1 > meHi2 and p1Hi1 < p1Hi2
+    bool d2 = useP2 and not na(meHi1) and not na(meHi2) and not na(p2Hi1) and not na(p2Hi2) and meHi1 > meHi2 and p2Hi1 < p2Hi2
+    d1 or d2
+f_smtBull() =>
+    bool d1 = useP1 and not na(meLo1) and not na(meLo2) and not na(p1Lo1) and not na(p1Lo2) and meLo1 < meLo2 and p1Lo1 > p1Lo2
+    bool d2 = useP2 and not na(meLo1) and not na(meLo2) and not na(p2Lo1) and not na(p2Lo2) and meLo1 < meLo2 and p2Lo1 > p2Lo2
+    d1 or d2
+smtBearRaw = f_smtBear()
+smtBullRaw = f_smtBull()
+recentSmtBull = ta.barssince(smtBullRaw) <= sweepLook
+recentSmtBear = ta.barssince(smtBearRaw) <= sweepLook
+f_smtConfirm(bool bull) => bull ? recentSmtBull : recentSmtBear
+
+// ── RB DETECTION ──
+f_rb(int o, int _swing, bool _reqStrong, float _strongPct, float _minBody, bool _reclaim, bool _minSweep, bool _swAtr, float _swAtrM, float _swPts, int _atrLen, int _cisdScan) =>
+    a = ta.atr(_atrLen)
+    float rDir = 0.0
+    float rTop = na
+    float rBot = na
+    float rExt = na
+    float rKey = na
+    float rStrong = 0.0
+    float rSize = 0.0
+    float rSwept = 0.0
+    float rCisd = na
+    float priorLo = na
+    float priorHi = na
+    for j = 1 to _swing
+        priorLo := na(priorLo) ? low[o + j] : math.min(priorLo, low[o + j])
+        priorHi := na(priorHi) ? high[o + j] : math.max(priorHi, high[o + j])
+    bodyTop = math.max(open[o], close[o])
+    bodyBot = math.min(open[o], close[o])
+    rng = high[o] - low[o]
+    bodyFrac = rng > 0 ? (bodyTop - bodyBot) / rng : 0.0
+    realBody = bodyFrac >= _minBody
+    bull = close[o] > open[o] and realBody
+    bear = close[o] < open[o] and realBody
+    swThr = _swAtr ? a * _swAtrM : _swPts
+    sweptLo = not na(priorLo) and low[o] < priorLo and ((not _minSweep) or (priorLo - low[o]) >= swThr)
+    reclaimB = (not _reclaim) or close[o] > priorLo
+    hasLowWick = bodyBot > low[o]
+    strongB = rng > 0 and (close[o] - low[o]) / rng >= _strongPct
+    sweptHi = not na(priorHi) and high[o] > priorHi and ((not _minSweep) or (high[o] - priorHi) >= swThr)
+    reclaimS = (not _reclaim) or close[o] < priorHi
+    hasHiWick = high[o] > bodyTop
+    strongS = rng > 0 and (high[o] - close[o]) / rng >= _strongPct
+    if bull and sweptLo and reclaimB and hasLowWick and ((not _reqStrong) or strongB)
+        rDir := 1.0
+        rTop := bodyBot
+        rBot := low[o]
+        rExt := low[o]
+        rKey := float(time[o])
+        rStrong := strongB ? 1.0 : 0.0
+        rSize := rng >= a * 0.8 ? 1.0 : 0.0
+        rSwept := 1.0
+        float cisdO = open[o]
+        bool runB = false
+        bool stopB = false
+        for m = 1 to _cisdScan
+            isB = close[o + m] < open[o + m]
+            if not stopB
+                if isB
+                    runB := true
+                    cisdO := open[o + m]
+                else if runB
+                    stopB := true
+        rCisd := cisdO
+    else if bear and sweptHi and reclaimS and hasHiWick and ((not _reqStrong) or strongS)
+        rDir := -1.0
+        rTop := high[o]
+        rBot := bodyTop
+        rExt := high[o]
+        rKey := float(time[o])
+        rStrong := strongS ? 1.0 : 0.0
+        rSize := rng >= a * 0.8 ? 1.0 : 0.0
+        rSwept := 1.0
+        float cisdO = open[o]
+        bool runS = false
+        bool stopS = false
+        for m = 1 to _cisdScan
+            isU = close[o + m] > open[o + m]
+            if not stopS
+                if isU
+                    runS := true
+                    cisdO := open[o + m]
+                else if runS
+                    stopS := true
+        rCisd := cisdO
+    [rDir, rTop, rBot, rExt, rKey, rStrong, rSize, rSwept, rCisd]
+
+f_scanRb(string tf) =>
+    request.security(syminfo.tickerid, tf, f_rb(1, swingLook, reqStrong, strongPct, minBody, gateReclaim, gateSweep, sweepUseAtr, sweepAtrM, sweepPts, atrLen, cisdLook), lookahead = barmerge.lookahead_off)
+
+[d1,t1,b1,e1,kk1,st1,sz1,sw1,cs1] = f_scanRb(rbTf1)
+[d2,t2,b2,e2,kk2,st2,sz2,sw2,cs2] = f_scanRb(rbTf2)
+[d3,t3,b3,e3,kk3,st3,sz3,sw3,cs3] = f_scanRb(rbTf3)
+
+// ── HTF FVG ──
+f_htfFvg(int o) =>
+    float top = na
+    float bot = na
+    float dir = 0.0
+    if low[o] > high[o + 2]
+        top := low[o]
+        bot := high[o + 2]
+        dir := 1.0
+    else if high[o] < low[o + 2]
+        top := low[o + 2]
+        bot := high[o]
+        dir := -1.0
+    float obTop = dir != 0.0 ? high[o + 2] : na
+    float obBot = dir != 0.0 ? low[o + 2]  : na
+    [top, bot, dir, obTop, obBot]
+
+[hfTop, hfBot, hfDir, hfObTv, hfObBv] = request.security(syminfo.tickerid, htfFvgTf, f_htfFvg(1), lookahead = barmerge.lookahead_off)
+hfKey = request.security(syminfo.tickerid, htfFvgTf, time, lookahead = barmerge.lookahead_off)
+
+var array<float> hfT = array.new<float>()
+var array<float> hfB = array.new<float>()
+var array<int>   hfD = array.new<int>()
+var array<box>   hfBx = array.new<box>()
+var array<float> hfObT = array.new<float>()
+var array<float> hfObB = array.new<float>()
+var array<int>   hfX = array.new<int>()
+var float lastHfKey = na
+if barstate.isconfirmed and hfDir != 0.0 and (na(lastHfKey) or hfKey != lastHfKey)
+    lastHfKey := hfKey
+    if (hfTop - hfBot) >= fvgMinPts
+        array.push(hfT, hfTop)
+        array.push(hfB, hfBot)
+        array.push(hfD, int(hfDir))
+        array.push(hfBx, na)
+        array.push(hfObT, hfObTv)
+        array.push(hfObB, hfObBv)
+        array.push(hfX, bar_index)
+if barstate.isconfirmed and array.size(hfT) > 0
+    staleDist = atrChart * fvgStaleAtr
+    for i = array.size(hfT) - 1 to 0
+        if i < array.size(hfT)
+            dd = array.get(hfD, i)
+            ft = array.get(hfT, i)
+            fb = array.get(hfB, i)
+            obt_i = array.get(hfObT, i)
+            obb_i = array.get(hfObB, i)
+            mid = (ft + fb) / 2.0
+            fillLo = useOB and not na(obb_i) ? math.min(fb, obb_i) : fb
+            fillHi = useOB and not na(obt_i) ? math.max(ft, obt_i) : ft
+            filled = dd == 1 ? close < fillLo : close > fillHi
+            stale = math.abs(close - mid) > staleDist
+            if filled or stale
+                bx = array.get(hfBx, i)
+                if not na(bx)
+                    box.delete(bx)
+                array.remove(hfT, i)
+                array.remove(hfB, i)
+                array.remove(hfD, i)
+                array.remove(hfBx, i)
+                array.remove(hfObT, i)
+                array.remove(hfObB, i)
+                array.remove(hfX, i)
+    if array.size(hfT) > 40
+        bx0 = array.get(hfBx, 0)
+        if not na(bx0)
+            box.delete(bx0)
+        array.shift(hfT)
+        array.shift(hfB)
+        array.shift(hfD)
+        array.shift(hfBx)
+        array.shift(hfObT)
+        array.shift(hfObB)
+        array.shift(hfX)
+var array<float> fvgDist = array.new<float>()
+var array<int>   fvgSel  = array.new<int>()
+if eDrawFvg and barstate.islast and array.size(hfT) > 0
+    n = array.size(hfT)
+    array.clear(fvgDist)
+    array.clear(fvgSel)
+    for i = 0 to n - 1
+        mid = (array.get(hfT, i) + array.get(hfB, i)) / 2.0
+        array.push(fvgDist, math.abs(close - mid))
+        array.push(fvgSel, 0)
+    int shown = 0
+    for pass = 0 to n - 1
+        if shown < fvgMaxShow
+            float bestD = 1e18
+            int bestI = -1
+            for i = 0 to n - 1
+                if array.get(fvgSel, i) == 0 and array.get(fvgDist, i) < bestD
+                    bestD := array.get(fvgDist, i)
+                    bestI := i
+            if bestI != -1
+                ftB = array.get(hfT, bestI)
+                fbB = array.get(hfB, bestI)
+                hB  = ftB - fbB
+                bool clash = false
+                if fvgSepPct > 0
+                    for j = 0 to n - 1
+                        if array.get(fvgSel, j) == 1
+                            ftS = array.get(hfT, j)
+                            fbS = array.get(hfB, j)
+                            ov  = math.min(ftB, ftS) - math.max(fbB, fbS)
+                            if ov > 0
+                                minH = math.min(hB, ftS - fbS)
+                                if minH > 0 and ov / minH >= fvgSepPct
+                                    clash := true
+                array.set(fvgSel, bestI, clash ? -1 : 1)
+                if not clash
+                    shown += 1
+    for i = 0 to n - 1
+        bx = array.get(hfBx, i)
+        if array.get(fvgSel, i) == 1
+            ft = array.get(hfT, i)
+            fb = array.get(hfB, i)
+            ox = math.max(array.get(hfX, i), bar_index - 200)
+            if na(bx)
+                array.set(hfBx, i, box.new(ox, ft, bar_index, fb, xloc = xloc.bar_index, border_color = color.new(fvgCol, 45), bgcolor = color.new(fvgCol, 90)))
+            else
+                box.set_left(bx, ox)
+                box.set_right(bx, bar_index)
+        else if not na(bx)
+            box.delete(bx)
+            array.set(hfBx, i, na)
+else if not eDrawFvg and barstate.islast and array.size(hfBx) > 0
+    for i = 0 to array.size(hfBx) - 1
+        bx = array.get(hfBx, i)
+        if not na(bx)
+            box.delete(bx)
+            array.set(hfBx, i, na)
+
+f_ceInAoi(float ce, bool bull) =>
+    bool ok = false
+    if array.size(hfT) > 0
+        for i = 0 to array.size(hfT) - 1
+            dd = array.get(hfD, i)
+            if (bull and dd == 1) or (not bull and dd == -1)
+                inFvg = ce >= array.get(hfB, i) and ce <= array.get(hfT, i)
+                obBi = array.get(hfObB, i)
+                obTi = array.get(hfObT, i)
+                inOb = useOB and not na(obBi) and not na(obTi) and ce >= obBi and ce <= obTi
+                if inFvg or inOb
+                    ok := true
+    ok
+
+// ── RB OBJECT ──
+type RB
+    string tf
+    bool   bull
+    float  top
+    float  bot
+    float  ce
+    float  ext
+    float  dispExt
+    float  score
+    int    bornBar
+    float  leftT
+    float  peak
+    bool   confirmed = false
+    bool   drawn   = false
+    bool   everLeft = false
+    bool   tapped   = false
+    bool   armed    = false
+    bool   frozen   = false
+    bool   active   = true
+    box    bx   = na
+    line   ceLn = na
+    line   o1   = na
+    line   o2   = na
+    line   o3   = na
+    line   cisdLn = na
+    label  cisdLb = na
+    float  cisdLvl = na
+    bool   cisdDone = false
+    int    stack   = 0
+    bool   smtOk   = false
+    bool   amdx    = false
+    int    dolType = 0
+    label  tag  = na
+
+method draw(RB z) =>
+    if not z.drawn
+        col = z.bull ? bullCol : bearCol
+        strongPdLoc = f_pdDepth(z.ce, z.bull) >= pdStrong and f_favPd(z.ce, z.bull)
+        rT  = int(z.leftT + extendMs)
+        bw  = strongPdLoc ? 2 : 1
+        z.bx := box.new(int(z.leftT), z.top, rT, z.bot, xloc = xloc.bar_time, border_color = color.new(col, strongPdLoc ? 0 : 30), bgcolor = color.new(col, strongPdLoc ? fillTransp - 8 : fillTransp), border_width = bw)
+        z.ceLn := line.new(int(z.leftT), z.ce, rT, z.ce, xloc = xloc.bar_time, color = color.new(ceCol, 0), style = line.style_dashed, width = 1)
+        if showTag
+            tagTxt = z.tf + "° " + gradeOf(z.score) + (z.dolType == 2 ? " ⟲REV" : z.dolType == 1 ? " ▶CONT" : "") + (z.amdx ? " ⊕AMDX" : "") + (strongPdLoc ? " ★" : "") + (showStack ? " ·" + str.tostring(z.stack) : "") + (z.smtOk ? " SMT" : "")
+            z.tag := label.new(int(z.leftT), z.bull ? z.bot : z.top, tagTxt, xloc = xloc.bar_time, style = z.bull ? label.style_label_up : label.style_label_down, color = color.new(strongPdLoc ? starCol : gradeColr(z.score), 10), textcolor = color.white, size = size.tiny)
+        z.drawn := true
+    true
+
+method extend(RB z) =>
+    if z.drawn
+        rT = int(time) + int(extendMs)
+        if not na(z.bx)
+            box.set_right(z.bx, rT)
+        if not na(z.ceLn)
+            line.set_x2(z.ceLn, rT)
+    true
+
+method drawOte(RB z) =>
+    if eDrawOte and z.drawn
+        rng = z.bull ? z.dispExt - z.ext : z.ext - z.dispExt
+        if rng >= atrChart * 0.5
+            l1 = z.bull ? z.dispExt - rng * ote1 : z.dispExt + rng * ote1
+            l2 = z.bull ? z.dispExt - rng * ote2 : z.dispExt + rng * ote2
+            l3 = z.bull ? z.dispExt - rng * ote3 : z.dispExt + rng * ote3
+            lT = int(z.leftT)
+            rT = int(time) + int(extendMs)
+            if na(z.o1)
+                z.o1 := line.new(lT, l1, rT, l1, xloc = xloc.bar_time, color = color.new(oteCol, 55), style = line.style_dotted)
+                z.o2 := line.new(lT, l2, rT, l2, xloc = xloc.bar_time, color = color.new(oteCol, 0), width = 1)
+                z.o3 := line.new(lT, l3, rT, l3, xloc = xloc.bar_time, color = color.new(oteCol, 55), style = line.style_dotted)
+            else
+                line.set_xy1(z.o1, lT, l1)
+                line.set_xy2(z.o1, rT, l1)
+                line.set_xy1(z.o2, lT, l2)
+                line.set_xy2(z.o2, rT, l2)
+                line.set_xy1(z.o3, lT, l3)
+                line.set_xy2(z.o3, rT, l3)
+    true
+
+method drawCisd(RB z) =>
+    if showCisd and z.drawn and not na(z.cisdLvl)
+        lT = int(z.leftT)
+        rT = int(z.leftT + cisdStubMs)
+        done = z.bull ? close > z.cisdLvl : close < z.cisdLvl
+        col = z.cisdDone or done ? color.new(cisdCol, 70) : color.new(cisdCol, 0)
+        if done
+            z.cisdDone := true
+        if na(z.cisdLn)
+            z.cisdLn := line.new(lT, z.cisdLvl, rT, z.cisdLvl, xloc = xloc.bar_time, color = col, style = line.style_solid, width = 2)
+            z.cisdLb := label.new(rT, z.cisdLvl, "CISD°", xloc = xloc.bar_time, style = label.style_label_left, color = color.new(#0b0e14, 100), textcolor = color.new(cisdCol, 0), size = size.tiny)
+        else
+            line.set_color(z.cisdLn, col)
+    true
+
+method kill(RB z) =>
+    if not na(z.bx)
+        box.delete(z.bx)
+        z.bx := na
+    if not na(z.ceLn)
+        line.delete(z.ceLn)
+        z.ceLn := na
+    if not na(z.o1)
+        line.delete(z.o1)
+        z.o1 := na
+    if not na(z.o2)
+        line.delete(z.o2)
+        z.o2 := na
+    if not na(z.o3)
+        line.delete(z.o3)
+        z.o3 := na
+    if not na(z.cisdLn)
+        line.delete(z.cisdLn)
+        z.cisdLn := na
+    if not na(z.cisdLb)
+        label.delete(z.cisdLb)
+        z.cisdLb := na
+    if not na(z.tag)
+        label.delete(z.tag)
+        z.tag := na
+    z.active := false
+    true
+
+// ── STORE + GRADED INTAKE ──
+var array<RB>    rbs   = array.new<RB>()
+var array<float> rbKey = array.new<float>(3, na)
+
+f_grade(bool bull, float ce, float strongV, float sizeV, float sweptV, string tf, bool nearOpen, bool amdIn, bool amdxIn, int dolTypeIn) =>
+    float s = 18.0
+    s += f_pdDepth(ce, bull) * wPD
+    realSweep = bull ? sweepBull : sweepBear
+    s += (sweptV > 0.5 and realSweep) ? wSweep : (sweptV > 0.5 ? wSweep * 0.4 : 0.0)
+    s += f_ceInAoi(ce, bull) ? wFvg : 0.0
+    s += f_inGap(ce) ? wGap : 0.0
+    s += f_smtConfirm(bull) ? wSMT : 0.0
+    s += nearOpen ? wOpen : 0.0
+    s += amdIn ? wAmd : 0.0
+    s += amdxIn ? amdxBoost : 0.0
+    s += dolTypeIn == 2 ? wDolRev : dolTypeIn == 1 ? wDolCont : 0.0
+    aligned = (bull and biasBull) or (not bull and not biasBull)
+    s += aligned ? wBias : 0.0
+    s += strongV > 0.5 ? wDisp : 0.0
+    s += sizeV > 0.5 ? 4.0 : 0.0
+    s += tf == rbTf3 ? 5.0 : tf == rbTf2 ? 3.0 : 0.0
+    math.min(s, 100.0)
+
+f_stackCount(bool bull, float ce, bool nearOpen, bool amdIn, int dolTypeIn) =>
+    int n = 0
+    realSweep = bull ? sweepBull : sweepBear
+    n += realSweep ? 1 : 0
+    n += f_favPd(ce, bull) ? 1 : 0
+    n += f_ceInAoi(ce, bull) ? 1 : 0
+    n += f_inGap(ce) ? 1 : 0
+    n += nearOpen ? 1 : 0
+    n += amdIn ? 1 : 0
+    n += ((bull and biasBull) or (not bull and not biasBull)) ? 1 : 0
+    n += f_smtConfirm(bull) ? 1 : 0
+    n += dolTypeIn != 0 ? 1 : 0
+    n
+
+f_intake(int slot, bool en, string tf, float dir, float top, float bot, float ext, float key, float strongV, float sizeV, float sweptV, float cisdV) =>
+    if en and barstate.isconfirmed and dir != 0.0 and not na(key) and slot < array.size(rbKey)
+        prev = array.get(rbKey, slot)
+        if na(prev) or key != prev
+            array.set(rbKey, slot, key)
+            bull = dir > 0.5
+            ce = (top + bot) / 2.0
+            fvgInside = f_ceInAoi(ce, bull)
+            proxBase = proxUseAtr ? atrChart * proxAtrM : proxPts
+            proxDist = proxBase * (amdSoftIn ? 1.5 : 1.0)
+            nearOpen = f_nearOpen(ce, proxDist)
+            favPdAny = f_favPd(ce, bull)
+            gapInside = f_inGap(ce)
+            amdxIn = f_amdxSetup(bull)
+            dt = useDOL ? f_setupType(bull, ce, ext) : 0
+            fvgPath  = gateFvg and fvgInside
+            openPath = gateKeyO and nearOpen
+            pdPath   = gatePd and favPdAny
+            gapPath  = gapAnchor and gapInside
+            amdxPath = useAMDX and amdxIn
+            intrinsicPath = gateIntrinsic and sweptV > 0.5
+            anchored = (amdxStrict and useAMDX) ? amdxPath : ((not gateFvg and not gateKeyO and not gatePd and not gateIntrinsic and not gapAnchor) ? true : (fvgPath or openPath or pdPath or gapPath or amdxPath or intrinsicPath))
+            if anchored and not amdHardBlock
+                sc = f_grade(bull, ce, strongV, sizeV, sweptV, tf, nearOpen, amdSoftIn, amdxIn, dt)
+                if gradeRank(gradeOf(sc)) >= minDrawRank
+                    bool skip = false
+                    if gateStack and array.size(rbs) > 0
+                        for i = 0 to array.size(rbs) - 1
+                            zz = array.get(rbs, i)
+                            if zz.active and zz.tf == tf and zz.bull == bull
+                                ov = math.min(top, zz.top) - math.max(bot, zz.bot)
+                                if ov > 0 and zz.score >= sc
+                                    skip := true
+                    if not skip and gateStack and array.size(rbs) > 0
+                        for i = 0 to array.size(rbs) - 1
+                            zz = array.get(rbs, i)
+                            if zz.active and zz.tf == tf and zz.bull == bull
+                                ov = math.min(top, zz.top) - math.max(bot, zz.bot)
+                                if ov > 0 and zz.score < sc
+                                    zz.kill()
+                    if not skip
+                        stk = f_stackCount(bull, ce, nearOpen, amdSoftIn, dt)
+                        smtC = f_smtConfirm(bull)
+                        isHtfBlk = tf != timeframe.period
+                        z = RB.new(tf = tf, bull = bull, top = top, bot = bot, ce = ce, ext = ext, dispExt = bull ? top : bot, score = sc, bornBar = bar_index, leftT = key, peak = ce, confirmed = (not gateDisp) or isHtfBlk, cisdLvl = cisdV, stack = stk, smtOk = smtC, amdx = amdxIn, dolType = dt)
+                        if z.confirmed
+                            z.draw()
+                        array.push(rbs, z)
+                        if array.size(rbs) > maxRbs
+                            old = array.get(rbs, 0)
+                            old.kill()
+                            array.remove(rbs, 0)
+    true
+
+if barstate.isconfirmed
+    f_intake(0, useRb1 and rbOk1, rbTf1, d1, t1, b1, e1, kk1, st1, sz1, sw1, cs1)
+    f_intake(1, useRb2 and rbOk2, rbTf2, d2, t2, b2, e2, kk2, st2, sz2, sw2, cs2)
+    f_intake(2, useRb3 and rbOk3, rbTf3, d3, t3, b3, e3, kk3, st3, sz3, sw3, cs3)
+
+var int sessSignals = 0
+var int lastNyDom = na
+if barstate.isconfirmed
+    nyDom = dayofmonth(time, tzNY)
+    if na(lastNyDom) or nyDom != lastNyDom
+        lastNyDom := nyDom
+        sessSignals := 0
+
+// ── LIFECYCLE + CISD-TRIGGERED QUOTA SIGNAL ──
+longFlag = false
+shortFlag = false
+float barBestScore = -1.0
+bool  barHasSig = false
+bool  barLong = false
+int   barBestType = 0
+float barBestExt = na
+float barBestDisp = na
+
+if barstate.isconfirmed and array.size(rbs) > 0
+    for i = 0 to array.size(rbs) - 1
+        if i < array.size(rbs)
+            z = array.get(rbs, i)
+            if z.active
+                rbMult  = z.tf == rbTf1 ? rbBars1 : z.tf == rbTf2 ? rbBars2 : rbBars3
+                dispCap = dispWin * rbMult
+                legCap  = maxLegBars * rbMult
+                if not z.confirmed
+                    z.peak := z.bull ? math.max(z.peak, high) : math.min(z.peak, low)
+                    disp = z.bull ? z.peak - z.ce : z.ce - z.peak
+                    thr = dispUseAtr ? atrChart * dispAtrM : dispPts
+                    if disp >= thr
+                        z.confirmed := true
+                        z.dispExt := z.peak
+                        z.draw()
+                    else if (bar_index - z.bornBar) > dispCap
+                        z.kill()
+                if z.active and z.confirmed
+                    if not z.tapped and (bar_index - z.bornBar) > legCap
+                        z.kill()
+                    else
+                        invalidated = z.bull ? (low < z.ext - invalBuf) : (high > z.ext + invalBuf)
+                        if invalidated
+                            z.kill()
+                        else
+                            if not z.frozen and not z.tapped
+                                z.dispExt := z.bull ? math.max(z.dispExt, high) : math.min(z.dispExt, low)
+                            if not z.everLeft
+                                z.everLeft := z.bull ? low > z.top : high < z.bot
+                            inZone = low <= z.top and high >= z.bot
+                            if z.everLeft and not z.tapped and inZone
+                                z.armed := true
+                            cisdOk = (not useCisdTrig) or f_cisdClose(z.bull, cisdLook)
+                            if z.armed and not z.tapped and cisdOk
+                                z.tapped := true
+                                z.frozen := true
+                                favPd = f_favPd(z.ce, z.bull)
+                                pdDepthHere = f_pdDepth(z.ce, z.bull)
+                                strongPdLoc = favPd and pdDepthHere >= pdStrong
+                                biasOk = (not reqBias) or (z.bull ? biasBull : not biasBull) or strongPdLoc
+                                extraConf = f_ceInAoi(z.ce, z.bull) or (z.bull ? sweepBull : sweepBear) or amdSoftIn
+                                bQualifies = allowPdB and z.score >= 60 and strongPdLoc and f_deepDualPd(z.ce, z.bull) and extraConf
+                                gradeOk = gradeRank(gradeOf(z.score)) >= minSigRank or bQualifies
+                                nearOpenNow = f_nearOpen(z.ce, (proxUseAtr ? atrChart * proxAtrM : proxPts) * (amdSoftIn ? 1.5 : 1.0))
+                                stkNow = f_stackCount(z.bull, z.ce, nearOpenNow, amdSoftIn, z.dolType)
+                                z.stack := stkNow
+                                stackOk = (not useStack) or stkNow >= minStack
+                                smtNow = f_smtConfirm(z.bull)
+                                z.smtOk := smtNow
+                                smtGate = (not smtReq) or smtNow
+                                dolOk = (not useDOL) or dolMode == "Tag only (no gate)" or (dolMode == "Both" and z.dolType != 0) or (dolMode == "Continuation only" and z.dolType == 1) or (dolMode == "Reversal only" and z.dolType == 2)
+                                if gradeOk and biasOk and stackOk and smtGate and dolOk and z.score > barBestScore
+                                    barBestScore := z.score
+                                    barHasSig := true
+                                    barLong := z.bull
+                                    barBestType := z.dolType
+                                    barBestExt := z.ext
+                                    barBestDisp := z.dispExt
+                            if z.armed and not z.tapped and (z.bull ? low > z.top : high < z.bot)
+                                z.armed := false
+                            z.extend()
+                            z.drawOte()
+                            z.drawCisd()
+
+var float sdAnchExt = na
+var float sdAnchDisp = na
+var bool  sdAnchLong = false
+var int   sdAnchBar = na
+var bool  sdReady = false
+if barstate.isconfirmed and barHasSig and sessSignals < maxSignals
+    sessSignals += 1
+    if barLong
+        longFlag := true
+    else
+        shortFlag := true
+    legChk = barLong ? (barBestDisp - barBestExt) : (barBestExt - barBestDisp)
+    if useStdDev and not na(barBestExt) and not na(barBestDisp) and legChk > 0
+        sdAnchExt := barBestExt
+        sdAnchDisp := barBestDisp
+        sdAnchLong := barLong
+        sdAnchBar := bar_index
+        sdReady := true
+    alert("CISD° " + (barLong ? "LONG" : "SHORT") + " · " + gradeOf(barBestScore) + (barBestType == 2 ? " ⟲REV" : barBestType == 1 ? " ▶CONT" : "") + " @ " + str.tostring(close, format.mintick), alert.freq_once_per_bar_close)
+
+// ── DRAW DEALING RANGE · PXH/PXL · KEY OPENS ──
+var line pdhLn=na, var line pdlLn=na, var line pdeLn=na
+var label pdhLb=na, var label pdlLb=na, var label pdeLb=na
+if drawPD and barstate.islast and not na(pdh)
+    int ox = f_clampX(na(dayStartX) ? bar_index - 1 : dayStartX)
+    if na(pdhLn)
+        pdhLn := line.new(ox, pdh, bar_index, pdh, xloc=xloc.bar_index, color=color.new(pdColr,10), style=line.style_solid)
+        pdlLn := line.new(ox, pdl, bar_index, pdl, xloc=xloc.bar_index, color=color.new(pdColr,10), style=line.style_solid)
+        pdeLn := line.new(ox, pdEq, bar_index, pdEq, xloc=xloc.bar_index, color=color.new(pdColr,40), style=line.style_dashed)
+        pdhLb := label.new(bar_index, pdh, "PDH°", xloc=xloc.bar_index, style=label.style_label_left, color=color.new(#0b0e14,100), textcolor=color.new(pdColr,0), size=size.tiny)
+        pdlLb := label.new(bar_index, pdl, "PDL°", xloc=xloc.bar_index, style=label.style_label_left, color=color.new(#0b0e14,100), textcolor=color.new(pdColr,0), size=size.tiny)
+        pdeLb := label.new(bar_index, pdEq, "EQ°", xloc=xloc.bar_index, style=label.style_label_left, color=color.new(#0b0e14,100), textcolor=color.new(pdColr,0), size=size.tiny)
+    line.set_xy1(pdhLn, ox, pdh)
+    line.set_xy2(pdhLn, bar_index, pdh)
+    line.set_xy1(pdlLn, ox, pdl)
+    line.set_xy2(pdlLn, bar_index, pdl)
+    line.set_xy1(pdeLn, ox, pdEq)
+    line.set_xy2(pdeLn, bar_index, pdEq)
+    label.set_xy(pdhLb, bar_index, pdh)
+    label.set_xy(pdlLb, bar_index, pdl)
+    label.set_xy(pdeLb, bar_index, pdEq)
+
+var array<line>  pxLn = array.new_line(6, na)
+var array<label> pxLb = array.new_label(6, na)
+f_drawPx(int slot, float val, int xb, string nm, color c) =>
+    ln = array.get(pxLn, slot)
+    lb = array.get(pxLb, slot)
+    okx = f_clampX(not na(xb) ? xb : bar_index - 1)
+    if eDrawPX and usePXH and not na(val)
+        if na(ln)
+            ln := line.new(okx, val, bar_index, val, xloc=xloc.bar_index, color=color.new(c,20), style=line.style_solid, width=1)
+            lb := label.new(bar_index, val, nm, xloc=xloc.bar_index, style=label.style_label_left, color=color.new(#0b0e14,100), textcolor=color.new(c,0), size=size.tiny)
+            array.set(pxLn, slot, ln)
+            array.set(pxLb, slot, lb)
+        line.set_xy1(ln, okx, val)
+        line.set_xy2(ln, bar_index, val)
+        label.set_xy(lb, bar_index, val)
+        label.set_text(lb, nm)
+    else if not na(ln)
+        line.delete(ln)
+        label.delete(lb)
+        array.set(pxLn, slot, na)
+        array.set(pxLb, slot, na)
+    true
+if barstate.islast
+    f_drawPx(0, asiaH, asiaX, "Asia High°", #9c88ff)
+    f_drawPx(1, asiaL, asiaX, "Asia Low°",  #9c88ff)
+    f_drawPx(2, lonH2, lonX,  "London High°", #5c9eff)
+    f_drawPx(3, lonL2, lonX,  "London Low°",  #5c9eff)
+    f_drawPx(4, nyH2,  nyX,   "NY High°", #4dd0e1)
+    f_drawPx(5, nyL2,  nyX,   "NY Low°",  #4dd0e1)
+
+if eDrawGaps and barstate.islast and array.size(gT_) > 0
+    for i = 0 to array.size(gT_) - 1
+        ft = array.get(gT_, i)
+        fb = array.get(gB_, i)
+        ce = array.get(gCE_, i)
+        ox = f_clampX(array.get(gX_, i))
+        ty = array.get(gTy_, i)
+        nm = ty == 1 ? "NWOG°" : ty == 2 ? "OPG°" : "NDOG°"
+        bx = array.get(gBx_, i)
+        cl = array.get(gCl_, i)
+        lb = array.get(gLb_, i)
+        if na(bx)
+            bx := box.new(ox, ft, bar_index, fb, xloc=xloc.bar_index, border_color=color.new(gapCol,60), bgcolor=color.new(gapCol,88))
+            cl := line.new(ox, ce, bar_index, ce, xloc=xloc.bar_index, color=color.new(gapCeCol,30), style=line.style_dashed)
+            lb := label.new(ox, ft, nm, xloc=xloc.bar_index, style=label.style_label_right, color=color.new(#0b0e14,100), textcolor=color.new(gapCol,0), size=size.tiny)
+            array.set(gBx_, i, bx)
+            array.set(gCl_, i, cl)
+            array.set(gLb_, i, lb)
+        box.set_right(bx, bar_index)
+        line.set_xy2(cl, bar_index, ce)
+
+var array<line>  opLn = array.new_line(6, na)
+var array<label> opLb = array.new_label(6, na)
+f_drawOpen(int slot, bool en, float val, int xb, string nm) =>
+    ln = array.get(opLn, slot)
+    lb = array.get(opLb, slot)
+    cxb = f_clampX(xb)
+    if eDrawOpens and en and not na(val) and not na(xb)
+        if na(ln)
+            ln := line.new(cxb, val, bar_index, val, xloc = xloc.bar_index, color = color.new(openCol, 30), style = line.style_dotted)
+            lb := label.new(bar_index, val, nm, xloc = xloc.bar_index, style = label.style_label_left, color = color.new(#0b0e14, 100), textcolor = openCol, size = size.tiny)
+            array.set(opLn, slot, ln)
+            array.set(opLb, slot, lb)
+        line.set_xy1(ln, cxb, val)
+        line.set_xy2(ln, bar_index, val)
+        label.set_xy(lb, bar_index, val)
+        label.set_text(lb, nm)
+    else if not na(ln)
+        line.delete(ln)
+        label.delete(lb)
+        array.set(opLn, slot, na)
+        array.set(opLb, slot, na)
+    true
+if barstate.islast
+    f_drawOpen(0, useO0000, o0000, x0000, "00:00°")
+    f_drawOpen(1, useO0830, o0830, x0830, "08:30°")
+    f_drawOpen(2, useO0930, o0930, x0930, "09:30°")
+    f_drawOpen(3, useO1000, o1000, x1000, "10:00°")
+    f_drawOpen(4, useO1330, o1330, x1330, "13:30°")
+    f_drawOpen(5, useO1800, o1800, x1800, "18:00°")
+
+var line dolLn = na
+var label dolLb = na
+if drawDOL and useDOL and barstate.islast and not na(dolPrice)
+    dist = math.round_to_mintick(math.abs(close - dolPrice))
+    txt = "DOL " + (dolDir > 0 ? "▲ " : "▼ ") + str.tostring(math.round_to_mintick(dolPrice)) + "  (" + str.tostring(dist) + ")"
+    if na(dolLn)
+        dolLn := line.new(bar_index - 80, dolPrice, bar_index + 12, dolPrice, xloc = xloc.bar_index, color = color.new(dolCol, 0), style = line.style_solid, width = 2)
+        dolLb := label.new(bar_index + 12, dolPrice, txt, xloc = xloc.bar_index, style = label.style_label_left, color = color.new(dolCol, 85), textcolor = color.new(dolCol, 0), size = size.normal)
+    line.set_xy1(dolLn, bar_index - 80, dolPrice)
+    line.set_xy2(dolLn, bar_index + 12, dolPrice)
+    label.set_xy(dolLb, bar_index + 12, dolPrice)
+    label.set_text(dolLb, txt)
+else if not na(dolLn)
+    line.delete(dolLn)
+    label.delete(dolLb)
+    dolLn := na
+    dolLb := na
+
+var line sdLn1 = na, var line sdLn2 = na, var line sdLn3 = na
+var label sdLb1 = na, var label sdLb2 = na, var label sdLb3 = na
+f_sdSet(line ln, label lb, float lvl, int x0, string nm) =>
+    line.set_xy1(ln, x0, lvl)
+    line.set_xy2(ln, bar_index + 12, lvl)
+    label.set_xy(lb, bar_index + 12, lvl)
+    label.set_text(lb, nm)
+    true
+if useStdDev and sdReady and barstate.islast and not na(sdAnchExt) and not na(sdAnchDisp)
+    leg = sdAnchLong ? (sdAnchDisp - sdAnchExt) : (sdAnchExt - sdAnchDisp)
+    if leg > 0
+        dir = sdAnchLong ? 1.0 : -1.0
+        l1 = sdAnchExt + dir * sdL1 * leg
+        l2 = sdAnchExt + dir * sdL2 * leg
+        l3 = sdAnchExt + dir * sdL3 * leg
+        x0 = f_clampX(na(sdAnchBar) ? bar_index - 40 : sdAnchBar)
+        if na(sdLn1)
+            sdLn1 := line.new(x0, l1, bar_index + 12, l1, xloc = xloc.bar_index, color = color.new(sdCol, 35), style = line.style_dotted)
+            sdLn2 := line.new(x0, l2, bar_index + 12, l2, xloc = xloc.bar_index, color = color.new(sdCol, 0), style = line.style_dotted, width = 2)
+            sdLn3 := line.new(x0, l3, bar_index + 12, l3, xloc = xloc.bar_index, color = color.new(sdCol, 35), style = line.style_dotted)
+            sdLb1 := label.new(bar_index + 12, l1, "", xloc = xloc.bar_index, style = label.style_label_left, color = color.new(#0b0e14, 100), textcolor = color.new(sdCol, 0), size = size.tiny)
+            sdLb2 := label.new(bar_index + 12, l2, "", xloc = xloc.bar_index, style = label.style_label_left, color = color.new(#0b0e14, 100), textcolor = color.new(sdCol, 0), size = size.tiny)
+            sdLb3 := label.new(bar_index + 12, l3, "", xloc = xloc.bar_index, style = label.style_label_left, color = color.new(#0b0e14, 100), textcolor = color.new(sdCol, 0), size = size.tiny)
+        f_sdSet(sdLn1, sdLb1, l1, x0, str.tostring(sdL1) + "σ")
+        f_sdSet(sdLn2, sdLb2, l2, x0, str.tostring(sdL2) + "σ  " + str.tostring(math.round_to_mintick(l2)))
+        f_sdSet(sdLn3, sdLb3, l3, x0, str.tostring(sdL3) + "σ max")
+else if not na(sdLn1)
+    line.delete(sdLn1)
+    line.delete(sdLn2)
+    line.delete(sdLn3)
+    label.delete(sdLb1)
+    label.delete(sdLb2)
+    label.delete(sdLb3)
+    sdLn1 := na
+    sdLn2 := na
+    sdLn3 := na
+    sdLb1 := na
+    sdLb2 := na
+    sdLb3 := na
+
+// ── DASHBOARD ──
+var table dash = na
+var int lastRowCount = -1
+if showDash and barstate.islast
+    int nAplus = 0
+    int nA = 0
+    int untapped = 0
+    int pending = 0
+    int nRb1 = 0
+    int nRb2 = 0
+    int nRb3 = 0
+    if array.size(rbs) > 0
+        for i = 0 to array.size(rbs) - 1
+            z = array.get(rbs, i)
+            if z.active
+                if z.tf == rbTf1
+                    nRb1 += 1
+                else if z.tf == rbTf2
+                    nRb2 += 1
+                else if z.tf == rbTf3
+                    nRb3 += 1
+                if not z.confirmed
+                    pending += 1
+                else
+                    if z.score >= 80
+                        nAplus += 1
+                    else if z.score >= 66
+                        nA += 1
+                    if not z.tapped
+                        untapped += 1
+    pdDepthNow = inDiscount ? f_pdDepth(close, true) : inPremium ? f_pdDepth(close, false) : 0.0
+    pdTxt = (inDiscount ? "DISC " : inPremium ? "PREM " : "EQ") + (inEq ? "" : str.tostring(math.round(pdDepthNow*100)) + "%")
+    pdC = inDiscount ? #26a69a : inPremium ? #ef5350 : mutCol
+    gateTxt = (gateFvg and gateKeyO and gatePd) ? "FVG+Open+PD" : "custom"
+    justSwept = sweepBull or sweepBear
+    rngAtr = atrChart > 0 ? rng20 / atrChart : 0.0
+    mmPhase = justSwept ? "Manip" : (rngAtr > 6.0 ? "Distrib" : "Accum")
+    mmC = mmPhase == "Manip" ? #ffee58 : mmPhase == "Distrib" ? #26a69a : mutCol
+    rowCount = 1 + (dRowSignals?1:0) + (dRowPd?1:0) + (dRowBias?1:0) + (dRowDol?1:0) + (dRowAmdx?1:0) + (dRowStack?1:0) + (dRowSmt?1:0) + (dRowMmxm?1:0) + (dRowGrades?3:0) + (dRowRbTf?1:0) + (dRowCisd?1:0) + (dRowFvg?1:0) + (dRowGaps?1:0) + (dRowAmd?1:0) + (dRowPend?1:0)
+    if na(dash) or rowCount != lastRowCount
+        if not na(dash)
+            table.delete(dash)
+        dash := table.new(dashPos, 2, rowCount, border_width = 1, frame_color = color.new(#30363d, 0), frame_width = 1)
+        lastRowCount := rowCount
+    table.cell(dash, 0, 0, "CISD° Powell", text_color = #e6edf3, text_halign = text.align_left, text_size = size.tiny, bgcolor = hdrBg)
+    table.cell(dash, 1, 0, gateTxt, text_color = #b07cff, text_halign = text.align_right, text_size = size.tiny, bgcolor = hdrBg)
+    int r = 1
+    if dRowSignals
+        table.cell(dash, 0, r, "Signals", text_color = accent, text_halign = text.align_left, text_size = size.tiny, bgcolor = rowBg)
+        table.cell(dash, 1, r, str.tostring(sessSignals) + " / " + str.tostring(maxSignals), text_color = sessSignals >= maxSignals ? #ffa726 : #00e676, text_halign = text.align_right, text_size = size.tiny, bgcolor = rowBg)
+        r += 1
+    if dRowPd
+        table.cell(dash, 0, r, "P/D", text_color = accent, text_halign = text.align_left, text_size = size.tiny, bgcolor = rowBg)
+        table.cell(dash, 1, r, pdTxt, text_color = pdC, text_halign = text.align_right, text_size = size.tiny, bgcolor = rowBg)
+        r += 1
+    if dRowBias
+        table.cell(dash, 0, r, "Bias (CISD)", text_color = accent, text_halign = text.align_left, text_size = size.tiny, bgcolor = rowBg)
+        table.cell(dash, 1, r, biasBull ? "▲ Bull" : "▼ Bear", text_color = biasBull ? #26a69a : #ef5350, text_halign = text.align_right, text_size = size.tiny, bgcolor = rowBg)
+        r += 1
+    if dRowDol
+        dolTxt = not useDOL ? "off" : na(dolPrice) ? "—" : ((dolDir > 0 ? "▲ " : "▼ ") + str.tostring(math.round_to_mintick(dolPrice)))
+        dolCc = not useDOL ? mutCol : na(dolPrice) ? mutCol : dolDir > 0 ? #26c6da : #ef9a9a
+        table.cell(dash, 0, r, "DOL→" + dolMode, text_color = accent, text_halign = text.align_left, text_size = size.tiny, bgcolor = rowBg)
+        table.cell(dash, 1, r, dolTxt, text_color = dolCc, text_halign = text.align_right, text_size = size.tiny, bgcolor = rowBg)
+        r += 1
+    if dRowAmdx
+        amdxArmed = useAMDX and (recentAmdxBull or recentAmdxBear)
+        amdxTxt = not useAMDX ? "off" : amdxArmed ? (kzName + (recentAmdxBull ? " ▲" : " ▼")) : inAnyKZ ? (kzName + " hunt") : "—"
+        amdxC = amdxArmed ? #ffb74d : inAnyKZ ? #ffee58 : mutCol
+        table.cell(dash, 0, r, "AMDX", text_color = accent, text_halign = text.align_left, text_size = size.tiny, bgcolor = rowBg)
+        table.cell(dash, 1, r, amdxTxt + (amdxStrict ? " ·strict" : ""), text_color = amdxC, text_halign = text.align_right, text_size = size.tiny, bgcolor = rowBg)
+        r += 1
+    if dRowStack
+        table.cell(dash, 0, r, "Stack gate", text_color = accent, text_halign = text.align_left, text_size = size.tiny, bgcolor = rowBg)
+        table.cell(dash, 1, r, useStack ? ("≥" + str.tostring(minStack)) : "off", text_color = useStack ? #b07cff : mutCol, text_halign = text.align_right, text_size = size.tiny, bgcolor = rowBg)
+        r += 1
+    if dRowSmt
+        smtTxt = not useSMT ? "off" : recentSmtBull ? "▲ Bull" : recentSmtBear ? "▼ Bear" : "—"
+        smtCc = recentSmtBull ? #26a69a : recentSmtBear ? #ef5350 : mutCol
+        table.cell(dash, 0, r, "SMT", text_color = accent, text_halign = text.align_left, text_size = size.tiny, bgcolor = rowBg)
+        table.cell(dash, 1, r, smtTxt, text_color = smtCc, text_halign = text.align_right, text_size = size.tiny, bgcolor = rowBg)
+        r += 1
+    if dRowMmxm
+        table.cell(dash, 0, r, "MMXM", text_color = accent, text_halign = text.align_left, text_size = size.tiny, bgcolor = rowBg)
+        table.cell(dash, 1, r, mmPhase, text_color = mmC, text_halign = text.align_right, text_size = size.tiny, bgcolor = rowBg)
+        r += 1
+    if dRowGrades
+        table.cell(dash, 0, r, "A+ live", text_color = accent, text_halign = text.align_left, text_size = size.tiny, bgcolor = rowBg)
+        table.cell(dash, 1, r, str.tostring(nAplus), text_color = #00e676, text_halign = text.align_right, text_size = size.tiny, bgcolor = rowBg)
+        r += 1
+        table.cell(dash, 0, r, "A live", text_color = accent, text_halign = text.align_left, text_size = size.tiny, bgcolor = rowBg)
+        table.cell(dash, 1, r, str.tostring(nA), text_color = #66bb6a, text_halign = text.align_right, text_size = size.tiny, bgcolor = rowBg)
+        r += 1
+        table.cell(dash, 0, r, "Untapped", text_color = accent, text_halign = text.align_left, text_size = size.tiny, bgcolor = rowBg)
+        table.cell(dash, 1, r, str.tostring(untapped), text_color = mutCol, text_halign = text.align_right, text_size = size.tiny, bgcolor = rowBg)
+        r += 1
+    if dRowRbTf
+        rbTfTxt = (useRb1 ? rbTf1 + "·" + str.tostring(nRb1) : "") + (useRb2 ? "  " + rbTf2 + "·" + str.tostring(nRb2) : "") + (useRb3 ? "  " + rbTf3 + "·" + str.tostring(nRb3) : "")
+        table.cell(dash, 0, r, "RB / TF", text_color = accent, text_halign = text.align_left, text_size = size.tiny, bgcolor = rowBg)
+        table.cell(dash, 1, r, rbTfTxt == "" ? "—" : rbTfTxt, text_color = #4dd0e1, text_halign = text.align_right, text_size = size.tiny, bgcolor = rowBg)
+        r += 1
+    if dRowCisd
+        table.cell(dash, 0, r, "CISD trig", text_color = accent, text_halign = text.align_left, text_size = size.tiny, bgcolor = rowBg)
+        table.cell(dash, 1, r, useCisdTrig ? "ON" : "off", text_color = useCisdTrig ? #00e676 : mutCol, text_halign = text.align_right, text_size = size.tiny, bgcolor = rowBg)
+        r += 1
+    if dRowFvg
+        table.cell(dash, 0, r, "HTF FVGs", text_color = accent, text_halign = text.align_left, text_size = size.tiny, bgcolor = rowBg)
+        table.cell(dash, 1, r, str.tostring(array.size(hfT)) + " · " + htfFvgTf, text_color = mutCol, text_halign = text.align_right, text_size = size.tiny, bgcolor = rowBg)
+        r += 1
+    if dRowGaps
+        table.cell(dash, 0, r, "Op. gaps", text_color = accent, text_halign = text.align_left, text_size = size.tiny, bgcolor = rowBg)
+        table.cell(dash, 1, r, useGaps ? str.tostring(array.size(gT_)) : "off", text_color = mutCol, text_halign = text.align_right, text_size = size.tiny, bgcolor = rowBg)
+        r += 1
+    if dRowAmd
+        table.cell(dash, 0, r, "AMD", text_color = accent, text_halign = text.align_left, text_size = size.tiny, bgcolor = rowBg)
+        table.cell(dash, 1, r, amdMode == "Off" ? "off" : amdMode + (inAmd ? " ·IN" : ""), text_color = inAmd ? #ffee58 : mutCol, text_halign = text.align_right, text_size = size.tiny, bgcolor = rowBg)
+        r += 1
+    if dRowPend
+        table.cell(dash, 0, r, "Pend disp", text_color = accent, text_halign = text.align_left, text_size = size.tiny, bgcolor = rowBg)
+        table.cell(dash, 1, r, gateDisp ? str.tostring(pending) : "off", text_color = mutCol, text_halign = text.align_right, text_size = size.tiny, bgcolor = rowBg)
+        r += 1
+
+// ── ALERTS ──
+alertcondition(longFlag,  "CISD° ▸ LONG",  "CISD° Powell LONG — bullish rejection block, CISD-confirmed at CE with stacked confluence.")
+alertcondition(shortFlag, "CISD° ▸ SHORT", "CISD° Powell SHORT — bearish rejection block, CISD-confirmed at CE with stacked confluence.")
+
+
+// ── STRATEGY ORDERS v2 ───────────────────────────────────────────────────
+// Two corrections over v1.
+//
+// 1. process_orders_on_close is now TRUE. In v1 it was false, so entries
+//    filled at the NEXT bar's open -- a five-minute lag on a 5m chart. A bot
+//    reacting to a bar close fills in about a second, so the lag was a large
+//    and unrealistic penalty on a signal whose premise IS the close-through.
+//    Slippage and commission stay on, so the fill is still costed.
+//
+// 2. The time stop no longer kills trades at birth. In v1 the hold window
+//    ended at 11:55 while entries were unrestricted, so an afternoon signal
+//    opened and was flattened on the very next bar. Now entries are confined
+//    to entryWin, and a position exits on the FIRST of: stop, target, holding
+//    longer than maxHoldMin, or the hard flat time.
+
+gStrat    = "17 ▸ Strategy"
+useStrat  = input.bool(true,  "Place orders on signals", group = gStrat)
+tgtMult   = input.float(2.0,  "Target (x displacement leg)", minval = 0.25, step = 0.25, group = gStrat)
+entryWin  = input.session("0930-1500", "Entry window", group = gStrat)
+holdWin   = input.session("0930-1600", "Hold window (flat outside)", group = gStrat)
+maxHoldMin= input.int(240, "Max hold (minutes)", minval = 5, maxval = 1440, group = gStrat)
+
+canEnter = useStrat and not na(time(timeframe.period, entryWin, tzNY))
+
+if canEnter and longFlag and not na(barBestExt) and not na(barBestDisp)
+    legL = barBestDisp - barBestExt
+    if legL > 0
+        strategy.entry("CISD L", strategy.long)
+        strategy.exit("L exit", "CISD L", stop = barBestExt, limit = barBestExt + tgtMult * legL)
+
+if canEnter and shortFlag and not na(barBestExt) and not na(barBestDisp)
+    legS = barBestExt - barBestDisp
+    if legS > 0
+        strategy.entry("CISD S", strategy.short)
+        strategy.exit("S exit", "CISD S", stop = barBestExt, limit = barBestExt - tgtMult * legS)
+
+heldMin = strategy.opentrades > 0 ? (time - strategy.opentrades.entry_time(0)) / 60000.0 : 0.0
+if useStrat and strategy.position_size != 0 and (heldMin >= maxHoldMin or na(time(timeframe.period, holdWin, tzNY)))
+    strategy.close_all("time flat")
+
+// ── EXPORT SERIES ────────────────────────────────────────────────────────
+float xSigDir = longFlag ? 1.0 : shortFlag ? -1.0 : 0.0
+bool  xHas    = longFlag or shortFlag
+float xScore  = xHas ? barBestScore : na
+float xType   = xHas ? barBestType  : na
+float xStop   = xHas ? barBestExt   : na
+float xDisp   = xHas ? barBestDisp  : na
+
+plot(xSigDir, "x_sig_dir",   display = display.data_window)
+plot(xScore,  "x_sig_score", display = display.data_window)
+plot(xType,   "x_sig_type",  display = display.data_window)
+plot(xStop,   "x_sig_stop",  display = display.data_window)
+plot(xDisp,   "x_sig_disp",  display = display.data_window)
+plot(biasDir, "x_bias",      display = display.data_window)
+plot(atrChart,"x_atr",       display = display.data_window)
+plot(pdh,     "x_pdh",       display = display.data_window)
+plot(pdl,     "x_pdl",       display = display.data_window)
