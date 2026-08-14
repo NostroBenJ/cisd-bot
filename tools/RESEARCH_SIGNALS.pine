@@ -1,0 +1,159 @@
+//@version=6
+// ════════════════════════════════════════════════════════════════════════════
+//  SIGNAL RESEARCH HARNESS — Pine port of research/harness.py
+//
+//  One strategy, a dropdown to pick the signal. Paste once, then run Deep
+//  Backtesting for each mode in turn.
+//
+//  RUN THESE, IN THIS ORDER:
+//    1. "random (NULL)"          <- the control. Run this FIRST.
+//    2. "mean reversion"
+//    3. "first bar continuation"
+//    4. "prev day sweep reclaim"
+//
+//  A candidate is only interesting if it beats the NULL, not if it beats zero.
+//  On the 1-year Python sample the null was NEGATIVE at every stop/target
+//  tested, purely from exit geometry and cost -- so "loses less than random"
+//  is a real result, and "makes a little money" is not automatically an edge.
+//
+//  Matches the Python harness: ATR-scaled stop and target, one entry per
+//  session, entries confined to a window, exit on first touch of stop or
+//  target, a bar-count time stop, and flat before the close.
+//
+//  Costs here are heavier than the Python harness (1 tick slippage plus $2
+//  commission, versus 0.02 ATR). Deliberate -- they apply equally to the null
+//  and to every candidate, so comparisons stay fair while absolute numbers
+//  stay honest.
+// ════════════════════════════════════════════════════════════════════════════
+
+strategy("Signal Research Harness", "SIGRES", overlay = true,
+     initial_capital        = 100000,
+     default_qty_type       = strategy.fixed,
+     default_qty_value      = 100,
+     commission_type        = strategy.commission.cash_per_order,
+     commission_value       = 1.0,
+     slippage               = 1,
+     use_bar_magnifier      = true,
+     calc_on_every_tick     = false,
+     process_orders_on_close = true,
+     max_bars_back          = 500)
+
+// ── inputs ──────────────────────────────────────────────────────────────────
+gSig  = "Signal"
+mode  = input.string("random (NULL)", "Signal", group = gSig, options = [
+     "random (NULL)", "mean reversion", "momentum",
+     "first bar continuation", "prev day sweep reclaim", "prev day break"])
+lookback = input.int(6, "Momentum / reversion lookback (bars)", minval = 2, group = gSig)
+nullRate = input.float(0.06, "NULL: entry probability per bar", minval = 0.01, maxval = 1.0, step = 0.01, group = gSig)
+nullSeed = input.int(42, "NULL: random seed", group = gSig)
+
+gEx   = "Exit"
+stopAtr = input.float(2.0, "Stop (x ATR)",   minval = 0.25, step = 0.25, group = gEx)
+tgtAtr  = input.float(2.0, "Target (x ATR)", minval = 0.25, step = 0.25, group = gEx)
+atrLen  = input.int(14, "ATR length", minval = 2, group = gEx)
+maxHold = input.int(60, "Max hold (bars)", minval = 5, group = gEx)
+
+gT    = "Timing"
+tz       = input.string("America/New_York", "Timezone", group = gT)
+entryWin = input.session("0930-1200", "Entry window", group = gT)
+holdWin  = input.session("0930-1555", "Hold window (flat outside)", group = gT)
+
+// ── context ─────────────────────────────────────────────────────────────────
+a       = ta.atr(atrLen)
+inEntry = not na(time(timeframe.period, entryWin, tz))
+inHold  = not na(time(timeframe.period, holdWin, tz))
+newDay  = ta.change(time("D")) != 0
+
+// Previous session's extremes.
+// NOTE the lookahead_on. With lookahead_off the [1] offset lands TWO days
+// back -- that is the seventh defect found in the CISD indicator, verified at
+// 98.1% across 257 sessions. lookahead_on with an explicit [1] offset is the
+// standard NON-repainting idiom for a previous-period value.
+pdh = request.security(syminfo.tickerid, "D", high[1], lookahead = barmerge.lookahead_on)
+pdl = request.security(syminfo.tickerid, "D", low[1],  lookahead = barmerge.lookahead_on)
+
+// Random draws are evaluated on EVERY bar, unconditionally. Stateful builtins
+// called inside a conditional advance their sequence only on the bars where
+// the branch is taken, which makes the "random" control depend on the very
+// thing it is supposed to be independent of.
+rndFire = math.random(0.0, 1.0, nullSeed)
+rndSide = math.random(0.0, 1.0, nullSeed + 1)
+
+var int  barsToday   = 0
+var bool tradedToday = false
+var bool firstUp     = false
+var bool firstDown   = false
+
+if newDay
+    barsToday   := 0
+    tradedToday := false
+    firstUp     := close > open
+    firstDown   := close < open
+barsToday += 1
+
+// ── signals ─────────────────────────────────────────────────────────────────
+// Each yields 1 (long), -1 (short) or 0. All read only closed bars.
+int sigDir = 0
+warm = barsToday > lookback
+
+if mode == "random (NULL)"
+    if warm and rndFire < nullRate
+        sigDir := rndSide < 0.5 ? 1 : -1
+
+else if mode == "mean reversion"
+    if warm
+        mv = close - close[lookback]
+        sigDir := mv > 0 ? -1 : mv < 0 ? 1 : 0
+
+else if mode == "momentum"
+    if warm
+        mv = close - close[lookback]
+        sigDir := mv > 0 ? 1 : mv < 0 ? -1 : 0
+
+else if mode == "first bar continuation"
+    // Enter on the session's 4th bar, in the direction of its 1st.
+    if barsToday == 4
+        sigDir := firstUp ? 1 : firstDown ? -1 : 0
+
+else if mode == "prev day sweep reclaim"
+    // Trade through yesterday's extreme and close back inside it. The CISD
+    // premise with everything else stripped away.
+    if not na(pdh) and high > pdh and close < pdh
+        sigDir := -1
+    if not na(pdl) and low < pdl and close > pdl
+        sigDir := 1
+
+else if mode == "prev day break"
+    if not na(pdh) and close > pdh
+        sigDir := 1
+    if not na(pdl) and close < pdl
+        sigDir := -1
+
+// ── orders ──────────────────────────────────────────────────────────────────
+canEnter = inEntry and not tradedToday and strategy.position_size == 0 and not na(a) and a > 0
+
+if canEnter and sigDir == 1
+    strategy.entry("L", strategy.long)
+    strategy.exit("Lx", "L", stop = close - stopAtr * a, limit = close + tgtAtr * a)
+    tradedToday := true
+
+if canEnter and sigDir == -1
+    strategy.entry("S", strategy.short)
+    strategy.exit("Sx", "S", stop = close + stopAtr * a, limit = close - tgtAtr * a)
+    tradedToday := true
+
+// Time stop and end-of-session flat. Without these a loser is carried for days
+// and the drawdown figures stop meaning anything.
+barsHeld = strategy.position_size != 0 ? bar_index - strategy.opentrades.entry_bar_index(0) : 0
+if strategy.position_size != 0 and (barsHeld >= maxHold or not inHold)
+    strategy.close_all("time flat")
+
+// ── export series ───────────────────────────────────────────────────────────
+// Unconditional top-level plots: they satisfy Pine's "a strategy must contain
+// an order or plot function" check outright, and carry diagnostics into the
+// chart-data export.
+plot(sigDir,    "x_dir",        display = display.data_window)
+plot(a,         "x_atr",        display = display.data_window)
+plot(pdh,       "x_pdh",        display = display.data_window)
+plot(pdl,       "x_pdl",        display = display.data_window)
+plot(barsToday, "x_bars_today", display = display.data_window)
