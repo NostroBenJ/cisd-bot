@@ -1,9 +1,9 @@
-// ════════════════════════════════════════════════════════════════════════════
-//  STRATEGY BUILD — generated, do not hand-edit.
-//  Identical to CISD_Powell_RB_v29_SPY.pine except: the indicator()
-//  declaration is now strategy(), and the order block at the end is new.
-//  Everything between is byte-identical to the indicator.
-// ════════════════════════════════════════════════════════════════════════════
+// ==========================================================================
+//  STRATEGY BUILD - generated, do not hand-edit.
+//  Identical to CISD_Powell_RB_v29_SPY.pine except the indicator()
+//  declaration is now strategy(), plus the order and export blocks
+//  at the end. Everything between is byte-identical.
+// ==========================================================================
 //@version=6
 // ════════════════════════════════════════════════════════════════════════════
 //  C I S D °  —  Powell Rejection-Block Model · v29  (Powell-pure · hardened)
@@ -11,7 +11,7 @@
 //   delivery SERIES (cisdMinRun=2), read on the chart TF beneath the HTF arrays.
 //  "Pauci sed electi"  —  few, but chosen
 // ════════════════════════════════════════════════════════════════════════════
-strategy("CISD° — Powell RB (SPY strategy)", "CISD° SPY-S", overlay = true, max_bars_back = 1000, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500, initial_capital = 100000, default_qty_type = strategy.fixed, default_qty_value = 100, commission_type = strategy.commission.cash_per_order, commission_value = 1.0, slippage = 1, use_bar_magnifier = true, calc_on_every_tick = false, process_orders_on_close = false)
+strategy("CISD° Powell RB SPY strategy", "CISD-S", overlay = true, max_bars_back = 1000, max_boxes_count = 500, max_lines_count = 500, max_labels_count = 500, initial_capital = 100000, default_qty_type = strategy.fixed, default_qty_value = 100, commission_type = strategy.commission.cash_per_order, commission_value = 1.0, slippage = 1, use_bar_magnifier = true, calc_on_every_tick = false, process_orders_on_close = false)
 
 // █ 1 ▸ RB TIMEFRAMES
 gT        = "1 ▸ RB Timeframes"
@@ -1587,8 +1587,7 @@ alertcondition(longFlag,  "CISD° ▸ LONG",  "CISD° Powell LONG — bullish re
 alertcondition(shortFlag, "CISD° ▸ SHORT", "CISD° Powell SHORT — bearish rejection block, CISD-confirmed at CE with stacked confluence.")
 
 
-// ── STRATEGY ORDERS ──
-
+// ── STRATEGY ORDERS ──────────────────────────────────────────────────────
 gStrat   = "17 ▸ Strategy"
 useStrat = input.bool(true,  "Place orders on signals", group = gStrat)
 tgtMult  = input.float(2.0,  "Target (x displacement leg)", minval = 0.25, step = 0.25, group = gStrat)
@@ -1598,9 +1597,8 @@ flatWin  = input.session("0930-1155", "Hold only inside this window", group = gS
 useFlat  = input.bool(true,  "Flat outside the hold window", group = gStrat)
 
 // The Pine's "sigma" levels are multiples of the displacement leg, not
-// standard deviations of anything. tgtMult is that multiple. Note the target
-// is measured from the block's EXTREME, not from entry, so a 2.0 multiple is
-// NOT a 2R trade — entry already sits some distance above the extreme.
+// standard deviations. The target is measured from the block's EXTREME, not
+// from entry, so a 2.0 multiple is NOT a 2R trade.
 canEnter = useStrat and ((not useWin) or not na(time(timeframe.period, entryWin, tzNY)))
 
 if canEnter and longFlag and not na(barBestExt) and not na(barBestDisp)
@@ -1615,8 +1613,33 @@ if canEnter and shortFlag and not na(barBestExt) and not na(barBestDisp)
         strategy.entry("CISD S", strategy.short)
         strategy.exit("S exit", "CISD S", stop = barBestExt, limit = barBestExt - tgtMult * legS)
 
-// Time stop. Without this a losing position is held until the stop or target
-// is touched, which can be days — not what an intraday bot does, and it makes
+// Time stop. Without it a loser is carried until the stop or target is
+// touched, which can be days -- not what an intraday bot does, and it makes
 // the drawdown figures meaningless.
 if useStrat and useFlat and strategy.position_size != 0 and na(time(timeframe.period, flatWin, tzNY))
     strategy.close_all("time flat")
+
+// ── EXPORT SERIES ────────────────────────────────────────────────────────
+// These are unconditional, top-level plot() calls. They satisfy Pine's
+// "a strategy must contain at least one plot or order function" check
+// outright, rather than relying on the compiler to notice orders buried in
+// nested conditionals -- and they carry the diagnostic columns into the
+// chart-data export. display.data_window keeps them off the chart.
+float xSigDir = longFlag ? 1.0 : shortFlag ? -1.0 : 0.0
+bool  xHas    = longFlag or shortFlag
+float xScore  = xHas ? barBestScore : na
+float xType   = xHas ? barBestType  : na
+float xStop   = xHas ? barBestExt   : na
+float xDisp   = xHas ? barBestDisp  : na
+
+plot(xSigDir, "x_sig_dir",   display = display.data_window)
+plot(xScore,  "x_sig_score", display = display.data_window)
+plot(xType,   "x_sig_type",  display = display.data_window)
+plot(xStop,   "x_sig_stop",  display = display.data_window)
+plot(xDisp,   "x_sig_disp",  display = display.data_window)
+plot(biasDir, "x_bias",      display = display.data_window)
+plot(atrChart,"x_atr",       display = display.data_window)
+plot(pdh,     "x_pdh",       display = display.data_window)
+plot(pdl,     "x_pdl",       display = display.data_window)
+plot(pwh,     "x_pwh",       display = display.data_window)
+plot(pwl,     "x_pwl",       display = display.data_window)
