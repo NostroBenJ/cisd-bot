@@ -9,6 +9,7 @@ volume/VWAP terms of `grade.py`.
 from __future__ import annotations
 
 import math
+from collections import deque
 from dataclasses import dataclass, field
 
 from .bars import Bar
@@ -102,82 +103,194 @@ class SessionRange:
 
 @dataclass
 class LiquidityPools:
-    """Tracks the levels the model treats as engineered liquidity, and whether
-    they have just been swept.
+    """Levels the model treats as engineered liquidity, and whether one has
+    been swept.
 
-    A sweep is: price traded through the level and then closed back inside it.
-    Trading through without closing back is not a sweep -- it is a break, and
-    the distinction is the entire premise of the rejection block."""
+    **The sweep test is stateless and rolling, not a latch.** The Pine asks, on
+    every bar:
+
+        ta.highest(high, sweepLook) > level  and  close < level
+
+    That is: the window's highest high reached above the level, AND price is
+    back below it *right now*. A latched "a sweep happened 8 bars ago" is a
+    different and much looser statement -- it stays true after price reclaims
+    the level, which is precisely when the setup has failed. Measured against
+    a year of 5-minute SPY, the latched version disagreed with the Pine on 27%
+    of bars for bull sweeps and 36% for bear.
+
+    Three families of level feed it, and note what is NOT among them: the
+    running high and low of the day. Those belong only to the manipulation
+    detector, which is a separate condition with a separate latch."""
 
     cfg: Config
-    ranges: dict[str, SessionRange] = field(default_factory=dict)
+    # Rolling window of the last `sweep_recency_bars` bars.
+    _highs: deque[float] = field(default_factory=deque)
+    _lows: deque[float] = field(default_factory=deque)
+
+    # Liquidity sessions: finalised at session end, then held (Pine lonHiF/nyHiF).
+    ss_live: dict[str, SessionRange] = field(default_factory=dict)
+    ss_final: dict[str, tuple[float, float]] = field(default_factory=dict)
+    _ss_inside: dict[str, bool] = field(default_factory=dict)
+
+    # PX sessions: live running range that persists after the session ends
+    # until the next one starts (Pine nyH2/nyL2). `done` gates their use as
+    # draw targets and resets each day.
+    px_live: dict[str, SessionRange] = field(default_factory=dict)
+    px_done: dict[str, bool] = field(default_factory=dict)
+    _px_inside: dict[str, bool] = field(default_factory=dict)
+
+    # Day extremes -- manipulation detector only.
     hod: float = math.nan
     lod: float = math.nan
-    _prev_hod: float = math.nan
-    _prev_lod: float = math.nan
+    _hod_raid: float = math.nan
+    _lod_raid: float = math.nan
+    _manip_bull_at: int | None = None
+    _manip_bear_at: int | None = None
+
+    _dr: DealingRange = field(default_factory=DealingRange)
     _date: str | None = None
-    _swept_high_at: int | None = None
-    _swept_low_at: int | None = None
-    _bar_index: int = 0
+    _index: int = 0
+    _last_close: float = math.nan
 
     def update(self, bar: Bar, index: int, dr: DealingRange) -> None:
-        self._bar_index = index
-        d = bar.session_date_ny
-        if d != self._date:
-            self._date = d
+        self._index = index
+        self._dr = dr
+        self._last_close = bar.close
+
+        window = max(1, self.cfg.sweep_recency_bars)
+        self._highs.append(bar.high)
+        self._lows.append(bar.low)
+        while len(self._highs) > window:
+            self._highs.popleft()
+            self._lows.popleft()
+
+        new_day = bar.session_date_ny != self._date
+        if new_day:
+            self._date = bar.session_date_ny
             self.hod, self.lod = bar.high, bar.low
-            self._prev_hod, self._prev_lod = math.nan, math.nan
+            self._hod_raid = self._lod_raid = math.nan
+            # Pine resets the per-session "done" flags on the day flip, but
+            # keeps the ranges themselves until the session restarts.
+            for k in self.px_done:
+                self.px_done[k] = False
         else:
-            self._prev_hod, self._prev_lod = self.hod, self.lod
+            prev_hod, prev_lod = self.hod, self.lod
+            if bar.high > prev_hod:
+                self._hod_raid = prev_hod
+            if bar.low < prev_lod:
+                self._lod_raid = prev_lod
             self.hod = max(self.hod, bar.high)
             self.lod = min(self.lod, bar.low)
 
-        for name in ("asia", "london", "ny"):
-            spec = _SESSION_SPECS[name]
-            sr = self.ranges.setdefault(name, SessionRange())
+        for name, spec in self.cfg.sweep_sessions:
+            sr = self.ss_live.setdefault(name, SessionRange())
             inside = in_session(bar, spec)
-            if inside and not sr.complete and math.isnan(sr.high):
+            was = self._ss_inside.get(name, False)
+            if inside and not was:
                 sr.reset(bar)
             elif inside:
                 sr.extend(bar)
+            elif was:
+                self.ss_final[name] = (sr.high, sr.low)
+            self._ss_inside[name] = inside
 
-        if self._sweep_high(bar, dr):
-            self._swept_high_at = index
-        if self._sweep_low(bar, dr):
-            self._swept_low_at = index
+        for name, spec in self.cfg.px_sessions:
+            sr = self.px_live.setdefault(name, SessionRange())
+            self.px_done.setdefault(name, False)
+            inside = in_session(bar, spec)
+            was = self._px_inside.get(name, False)
+            if inside and not was:
+                sr.reset(bar)
+            elif inside:
+                sr.extend(bar)
+            elif was:
+                sr.complete = True
+                self.px_done[name] = True
+            self._px_inside[name] = inside
 
-    def _sweep_high(self, bar: Bar, dr: DealingRange) -> bool:
-        levels = []
-        if self.cfg.score_pd_sweeps and dr.ready():
-            levels.append(dr.pdh)
-        for sr in self.ranges.values():
-            if not math.isnan(sr.high):
-                levels.append(sr.high)
-        if self.cfg.hunt_hod_lod and not math.isnan(self._prev_hod):
-            levels.append(self._prev_hod)
-        return any(bar.high > lvl and bar.close < lvl for lvl in levels)
+        self._update_manipulation(bar, index)
 
-    def _sweep_low(self, bar: Bar, dr: DealingRange) -> bool:
-        levels = []
-        if self.cfg.score_pd_sweeps and dr.ready():
-            levels.append(dr.pdl)
-        for sr in self.ranges.values():
-            if not math.isnan(sr.low):
-                levels.append(sr.low)
-        if self.cfg.hunt_hod_lod and not math.isnan(self._prev_lod):
-            levels.append(self._prev_lod)
-        return any(bar.low < lvl and bar.close > lvl for lvl in levels)
+    # ── the sweep test ──────────────────────────────────────────────────────
 
+    def _levels(self, high_side: bool) -> list[float]:
+        out: list[float] = []
+        if self.cfg.score_pd_sweeps and self._dr.ready():
+            out.append(self._dr.pdh if high_side else self._dr.pdl)
+        if self.cfg.use_session_sweeps:
+            for hi, lo in self.ss_final.values():
+                out.append(hi if high_side else lo)
+        if self.cfg.use_px_levels:
+            for sr in self.px_live.values():
+                out.append(sr.high if high_side else sr.low)
+        return [v for v in out if not math.isnan(v)]
+
+    def swept(self, bull: bool) -> bool:
+        """Port of `sweepBull` / `sweepBear`.
+
+        A bullish setup wants liquidity taken BELOW: the window's lowest low
+        dipped under a level and price closed back above it."""
+        if not self._highs:
+            return False
+        if bull:
+            ll = min(self._lows)
+            return any(ll < lvl and self._last_close > lvl for lvl in self._levels(False))
+        hh = max(self._highs)
+        return any(hh > lvl and self._last_close < lvl for lvl in self._levels(True))
+
+    # `recently_swept` is retained as the name used by the grader; the
+    # semantics are now the Pine's rolling test rather than a latch.
     def recently_swept(self, bull: bool) -> bool:
-        """A sweep in the direction that supports `bull`, inside the recency
-        window. A bullish setup wants a swept LOW (liquidity taken below)."""
-        at = self._swept_low_at if bull else self._swept_high_at
+        return self.swept(bull)
+
+    # ── manipulation (AMDX) -- a separate condition with its own latch ──────
+
+    def _update_manipulation(self, bar: Bar, index: int) -> None:
+        in_kz = any(in_session(bar, k) for k in self.cfg.killzones)
+        if not (self.cfg.hunt_manipulation and in_kz):
+            return
+
+        dr = self._dr
+        bear = False
+        bull = False
+
+        if self.cfg.hunt_pd_pools and dr.ready():
+            bear = bear or (bar.high > dr.pdh and bar.close < dr.pdh)
+            bull = bull or (bar.low < dr.pdl and bar.close > dr.pdl)
+
+        if self.cfg.hunt_hod_lod:
+            if not math.isnan(self._hod_raid) and bar.close < self._hod_raid:
+                bear = True
+                self._hod_raid = math.nan
+            if not math.isnan(self._lod_raid) and bar.close > self._lod_raid:
+                bull = True
+                self._lod_raid = math.nan
+
+        for name, done in self.px_done.items():
+            if not done:
+                continue
+            sr = self.px_live[name]
+            if not math.isnan(sr.high):
+                bear = bear or (bar.high > sr.high and bar.close < sr.high)
+            if not math.isnan(sr.low):
+                bull = bull or (bar.low < sr.low and bar.close > sr.low)
+
+        if bear:
+            self._manip_bear_at = index
+        if bull:
+            self._manip_bull_at = index
+
+    def manipulation(self, bull: bool) -> bool:
+        """Port of `f_amdxSetup`. Unlike the sweep test this IS latched --
+        `ta.barssince(manip) <= sweepLook` in the Pine."""
+        at = self._manip_bull_at if bull else self._manip_bear_at
         if at is None:
             return False
-        return (self._bar_index - at) <= self.cfg.sweep_recency_bars
+        return (self._index - at) <= self.cfg.sweep_recency_bars
 
-
-_SESSION_SPECS = {"asia": "1800-0000", "london": "0300-0800", "ny": "0930-1600"}
+    @property
+    def ranges(self) -> dict[str, SessionRange]:
+        """PX session ranges, for the draw-on-liquidity targets."""
+        return self.px_live
 
 
 # ── fair value gaps ─────────────────────────────────────────────────────────

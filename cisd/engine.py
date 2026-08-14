@@ -351,8 +351,15 @@ class CisdEngine:
             d = bar.session_date_ny
             if d != cur_session:
                 cur_session = d
-                if cfg.quota_resets_at_session:
-                    session_signals = 0
+                # The quota ALWAYS resets on a day boundary. `quota_resets_at_
+                # session` chooses WHICH boundary -- the Pine rolls on the NY
+                # calendar date (midnight), so an overnight signal spends the
+                # budget before 09:30, while the corrected build rolls at the
+                # traded-window open. On regular-hours data the two coincide.
+                # Treating the flag as "never reset" made the counter
+                # accumulate across the whole year and silently blocked every
+                # signal after the sixth.
+                session_signals = 0
                 pd_h, pd_l = prev_day.get(d, (math.nan, math.nan))
                 pw_h, pw_l = prev_week.get(d, (math.nan, math.nan))
                 dr = DealingRange(pd_h, pd_l, pw_h, pw_l)
@@ -456,7 +463,7 @@ class CisdEngine:
         fav_pd = dr.favourable(blk.ce, blk.bull, cfg.eq_band_pct)
         in_gap = gaps.contains(blk.ce)
         in_amd = cfg.amd_mode != "Off" and any(in_session(bar, w) for w in cfg.amd_windows)
-        amdx = cfg.hunt_manipulation and any(in_session(bar, k) for k in cfg.killzones) and pools.recently_swept(blk.bull)
+        amdx = pools.manipulation(blk.bull)
 
         # The anchor gate. In the Pine `gate_intrinsic_any_sweep` is effectively
         # always true, which makes this whole test vacuous; with the fix on, the

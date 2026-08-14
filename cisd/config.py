@@ -146,6 +146,16 @@ class Config:
     # ── 12 · liquidity ──────────────────────────────────────────────────────
     score_pd_sweeps: bool = True         # port: usePdSwp
     sweep_recency_bars: int = 12         # port: sweepLook
+    # port: useSsSwp -- finalised session ranges (lonSess / nySess). These are
+    # captured when the session ENDS and then held.
+    use_session_sweeps: bool = True
+    sweep_sessions: tuple[tuple[str, str], ...] = (
+        ("london", "0300-1100"), ("ny", "0930-1600"),
+    )
+    # port: usePXH -- live session ranges that persist after the session ends
+    # until the next one starts. Asia and London are off in the SPY preset.
+    use_px_levels: bool = True
+    px_sessions: tuple[tuple[str, str], ...] = (("ny", "0930-1600"),)
 
     # ── 12b · SMT divergence ────────────────────────────────────────────────
     use_smt: bool = True                 # port: useSMT
