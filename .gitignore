@@ -10,3 +10,4 @@ data_store/
 *.log
 data/uw/
 data/uw_openapi.yaml
+data/cboe/
