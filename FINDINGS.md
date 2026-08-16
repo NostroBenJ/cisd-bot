@@ -5,8 +5,8 @@ by accident. Every number is reproducible from the scripts in this repo.
 
 ## Summary
 
-Six experiments. **Five negative, one strongly positive — and the positive one
-runs in the direction this account cannot trade.**
+Eight experiments. **Six negative, two with real measured effects — and both of
+those run in directions this account cannot trade.**
 
 | # | test | n | result |
 |---|---|---:|---|
@@ -16,6 +16,8 @@ runs in the direction this account cannot trade.**
 | 4 | first-bar continuation | 6,521 | **t = +0.96**, dies on concentration |
 | 5 | order-flow archive | 90 days | built, not yet tested — underpowered |
 | 6 | **variance risk premium** | **1,050** | **t = −4.26** · real, stable, unexploitable here |
+| 7 | gamma regime (the vault rule) | 247 | direction NO (t = −1.22) · size YES (t = −6.57) |
+| 8 | published intraday momentum | 594 OOS | Sharpe **1.83 → 0.08** · dead after publication |
 
 ---
 
@@ -140,6 +142,51 @@ t = −0.36** — still negative, indistinguishable from the other 83%.
 spot gross** — and the seller's **worst 1% of days cost 36% of the edge**. That
 concentration is not a flaw in the trade, it *is* the trade. The premium exists
 as compensation for exactly that tail.
+
+## 8 · Published intraday momentum strategy — DEAD OUT OF SAMPLE
+
+`python -m research.intraday_momentum`. Zarattini, Aziz & Barbon (2025),
+*"Beat the Market: An Effective Intraday Momentum Strategy for SPY."* Claims
+9.7%/yr at Sharpe 1.24 unlevered over 2007–early 2024, 19.6% with up to 4×
+sizing.
+
+**Replication first.** Their FAQ publishes monthly returns, so the check is
+month by month rather than against a 17-year Sharpe:
+
+| | in-sample overlap | out-of-sample |
+|---|---|---|
+| monthly correlation with their table | **+0.830** (20 mo) | **+0.899** (19 mo) |
+| mean monthly, ours vs theirs | +2.44% vs +2.67% | +0.60% vs +1.29% |
+
+Hit ratio reconciles too: 31.3% over all days looks wrong against their 43%,
+but **37% of sessions never leave the Noise Area**; over traded days only it is
+49.4%.
+
+**Then the out-of-sample run, once, with no tweaking afterward:**
+
+| period | n | IRR | Sharpe |
+|---|---:|---:|---:|
+| in-sample 2022-07→2024-02 | 396 | **+11.79%** | **+1.83** |
+| out-of-sample 2024-03→2026-08 | 594 | **+0.32%** | **+0.08** |
+| beyond even their published updates (2025-10+) | 201 | **−5.23%** | **−1.04** |
+
+Year by year at 1×, the decay is monotone: Sharpe **2.11 → 1.78 → 0.42 → 0.41
+→ −0.81** across 2022–2026.
+
+**This is not an implementation failure.** Correlation with their own table is
+*higher* out-of-sample than in. **Their published numbers show the same
+collapse** — mean monthly +2.67% before, +1.29% after.
+
+Concentration test on the out-of-sample days: all 594 average +0.20bp
+(t = +0.13); **remove the best five days and it goes negative** at −1.68bp.
+Whatever remains is a handful of sessions, not an edge.
+
+The paper's first version is May 2024 and the strategy stops working in
+early-to-mid 2024. Crowding after publication, regime change, or a
+flattering in-sample window are all consistent and cannot be separated here.
+
+**Prediction recorded before running: "meaningfully worse but not dead."**
+Wrong, in the optimistic direction.
 
 ---
 
