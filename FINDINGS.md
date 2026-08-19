@@ -260,6 +260,38 @@ not separate it from intraday.
 **Verdict: negative.** Not reproduced, not separable, not tradeable, and what
 significance exists rests on ten days.
 
+## 10 · Moving averages — nothing, across 36 pre-registered tests
+
+`python -m research.ema_test` · 399,114 bars, 1,027 sessions, 2022-07 → 2026-08.
+
+None of the original twelve candidates used a moving average. That was a gap in
+coverage, not a judgement, so it got closed. Parameters were **pre-registered
+as the conventional ones** -- 9/21, 8/21, 12/26, 20/50 crossovers and pullbacks,
+plus 21/50 trend and slope filters -- and deliberately **not searched**. A search
+over fast/slow pairs manufactures a winner: at 36 tests, ~2 clear p<0.05 by
+chance alone.
+
+**Nothing cleared |t| >= 2.5 against the null.** Best of 36 was
+`ema_pullback_9_21` at **+1.95** (2.0/2.0 ATR). The Bonferroni threshold for 36
+tests is **|t| >= 3.20**. Win rates sat between 47% and 53%; every mean R was
+within a standard error of the null.
+
+**One row earns its place as a teaching case:**
+
+```
+ema_cross_12_26   n 1012   meanR -0.085   t vs 0 -2.72   t vs null -1.35
+```
+
+Against *zero* that is a significant losing signal, and the obvious move is to
+invert and trade it. Against the **null** it is noise -- the −2.72 is the exit
+geometry losing money by itself, not the signal. Inverting it would have bought
+nothing. This is precisely the error that measuring against zero produces, and
+the reason the null exists.
+
+**Verdict: closed.** Not to be re-tested with different lengths. Re-testing with
+new parameters after seeing this table is the search this experiment was
+designed to avoid.
+
 ## What is settled
 
 **Simple price-pattern prediction of SPY intraday direction does not work.**

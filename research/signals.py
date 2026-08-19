@@ -198,3 +198,96 @@ CANDIDATES = {
     "first_bar_continuation": first_bar_continuation,
     "inside_bar_break": inside_bar_break,
 }
+
+
+# ── moving averages ─────────────────────────────────────────────────────────
+#
+# Added 2026-08-19. None of the original twelve used a moving average, which
+# was a coverage gap rather than a judgement -- so it gets closed. The prior is
+# low: this is the most-tested family of rules in retail trading, and anything
+# that worked on 1-minute SPY with standard parameters would have been arbitraged
+# long ago. Testing it is still worth minutes, because "we never checked" is a
+# worse answer than "we checked and it does not work".
+#
+# The parameter sets below are PRE-REGISTERED as the conventional ones (9/21,
+# 8/21, 12/26, 20/50, and 21/50 as trend filters). They are not searched. A
+# search over fast/slow pairs would find something at |t| >= 2.5 by chance --
+# see FINDINGS.md on counting comparisons.
+
+
+def _ema_at(bars: list[Bar], i: int, length: int) -> float:
+    """EMA of closes at bar `i`, reading only bars at or before `i`.
+
+    Seeded with an SMA over a bounded lookback rather than the whole series.
+    An EMA forgets geometrically, so 10 half-lives is indistinguishable from an
+    infinite history -- and it keeps this O(length) per call instead of O(n),
+    which matters when it runs on every bar of a million-bar series."""
+    if length < 1 or i < length:
+        return float("nan")
+    span = min(i + 1, 10 * length)
+    start = i - span + 1
+    k = 2.0 / (length + 1.0)
+    seed = sum(bars[j].close for j in range(start, start + length)) / length
+    e = seed
+    for j in range(start + length, i + 1):
+        e = bars[j].close * k + e * (1.0 - k)
+    return e
+
+
+def ema_cross(bars: list[Bar], i: int, fast: int = 9, slow: int = 21) -> int:
+    """Fast EMA crossing the slow one, on the bar the cross completes."""
+    if i < slow + 2:
+        return 0
+    if bars[i].session_date_ny != bars[i - 1].session_date_ny:
+        return 0
+    f0, s0 = _ema_at(bars, i - 1, fast), _ema_at(bars, i - 1, slow)
+    f1, s1 = _ema_at(bars, i, fast), _ema_at(bars, i, slow)
+    if any(v != v for v in (f0, s0, f1, s1)):
+        return 0
+    if f0 <= s0 and f1 > s1:
+        return 1
+    if f0 >= s0 and f1 < s1:
+        return -1
+    return 0
+
+
+def ema_cross_fade(bars: list[Bar], i: int, fast: int = 9, slow: int = 21) -> int:
+    """The mirror. If the cross carries information, one side of it should."""
+    return -ema_cross(bars, i, fast, slow)
+
+
+def ema_trend(bars: list[Bar], i: int, length: int = 21) -> int:
+    """Price above or below a single EMA. A pure trend filter, no trigger."""
+    e = _ema_at(bars, i, length)
+    if e != e:
+        return 0
+    c = bars[i].close
+    return 1 if c > e else -1 if c < e else 0
+
+
+def ema_pullback(bars: list[Bar], i: int, fast: int = 9, slow: int = 21) -> int:
+    """In an EMA-defined trend, price touches the fast EMA and closes back
+    with the trend. The textbook continuation entry."""
+    if i < slow + 2:
+        return 0
+    if bars[i].session_date_ny != bars[i - 1].session_date_ny:
+        return 0
+    f, s = _ema_at(bars, i, fast), _ema_at(bars, i, slow)
+    if f != f or s != s:
+        return 0
+    b = bars[i]
+    if f > s and b.low <= f and b.close > f:
+        return 1
+    if f < s and b.high >= f and b.close < f:
+        return -1
+    return 0
+
+
+def ema_slope(bars: list[Bar], i: int, length: int = 21, lookback: int = 5) -> int:
+    """Direction of the EMA itself over `lookback` bars."""
+    if i < length + lookback + 1:
+        return 0
+    a, b = _ema_at(bars, i - lookback, length), _ema_at(bars, i, length)
+    if a != a or b != b:
+        return 0
+    return 1 if b > a else -1 if b < a else 0
