@@ -190,6 +190,76 @@ Wrong, in the optimistic direction.
 
 ---
 
+## 9 · Overnight vs intraday — the famous effect does not reproduce, and the tradeable version loses
+
+`python -m research.overnight [cost_bp]` · 1,017 paired sessions, 2022-07-12 →
+2026-08-12, built from the **extended-hours half of the archive we had been
+discarding** (327,145 `pr`/`po` bars across 1,032 files).
+
+The published claim on US equity indices is that essentially all of the return
+accrues overnight while the intraday session contributes ~nothing. Directly
+tradeable by a cash account at one share: buy the close, sell the open.
+
+**Structural check first.** In logs the split is an identity, not an
+approximation: `overnight + intraday == total`, max deviation **3.09e-16** over
+1,017 days. And the total reconciles to reality — the model reports +18.89%/yr
+against SPY's actual +18.63% CAGR over the same 4.09 years.
+
+| leg | n | mean/day | t | annualised | Sharpe |
+|---|---:|---:|---:|---:|---:|
+| overnight | 1,017 | +4.32bp | +2.16 | +11.49% | +1.07 |
+| intraday | 1,017 | +2.55bp | +0.97 | +6.64% | +0.48 |
+| total | 1,017 | +6.87bp | +2.18 | +18.89% | +1.09 |
+
+**The effect does not reproduce.** Overnight minus intraday is **Welch
+t = +0.53**. Intraday is *positive* here, merely noisier — not the ~zero the
+literature describes. The two legs cannot be distinguished in this sample.
+
+**And the tradeable version loses to doing nothing.** Trading only the
+overnight leg means forfeiting the intraday return and paying two auction
+crossings a day:
+
+| cost assumption | overnight net | vs buy & hold |
+|---|---:|---:|
+| 1.0bp round trip | +8.71%/yr | **−10.17%/yr** |
+| 0.3bp (SPY 1¢ spread) | +10.65%/yr | **−8.24%/yr** |
+
+Break-even cost for the overnight leg alone is 4.32bp; above that it is
+negative outright. But break-even against *zero* is the wrong bar — the bar is
+buy-and-hold, and it loses to that at any cost. Risk-adjusted the two are a
+wash (SR 1.07 vs 1.09), so there is nothing to lever into either.
+
+**Concentration kills what significance there is.** Dropping the best 1%:
+overnight t **+2.16 → +0.96**; intraday **flips sign**, +6.64% → −1.80%. Ten
+days out of 1,017 carry it — the same failure that inverted experiment 4.
+
+Split-half is the one thing it passes: both legs keep their sign across the
+2024-07-25 boundary, overnight strengthening (t +0.99 → +2.00).
+
+**The one genuinely interesting residue.** Splitting the overnight window using
+the extended-hours prints locates where it lives:
+
+| sub-window | mean/day | t | Sharpe |
+|---|---:|---:|---:|
+| post-close 16:00–20:00 | +0.89bp | +1.06 | +0.53 |
+| **true gap 20:00–04:00** | **+2.97bp** | **+2.41** | **+1.20** |
+| pre-open 04:00–09:30 | +0.46bp | +0.33 | +0.16 |
+
+Two thirds of the overnight return accrues in the eight hours when US retail
+cannot trade at all. That is consistent with it being compensation for
+overnight gap risk rather than an inefficiency — and it is emphatically **not**
+tradeable: those prints are thin, often stale, and unreachable from a
+Robinhood cash account.
+
+**Bounds on the conclusion.** 4.1 years against a literature measured over
+decades. Dividends are absent from this price-only data, so SPY's ~1.2%/yr
+yield is booked as four overnight *losses* a year — the overnight figure is
+understated by roughly that much, which would lift it to ~12.7%/yr and still
+not separate it from intraday.
+
+**Verdict: negative.** Not reproduced, not separable, not tradeable, and what
+significance exists rests on ten days.
+
 ## What is settled
 
 **Simple price-pattern prediction of SPY intraday direction does not work.**
