@@ -152,12 +152,11 @@ class RiskGate:
             return self._halted
         return None
 
-    def can_open(self, sig: Signal, contract_price: float,
-                 minute_of_day_ny: int, delta: float = 0.5) -> Decision:
-        """May the bot open this position, and at what size?
+    def _pre_trade_gates(self, minute_of_day_ny: int) -> Decision | None:
+        """The gates that do not depend on WHAT is being bought.
 
-        `contract_price` is the option's ask in dollars per share (so a $1.50
-        quote costs $150 for one contract)."""
+        Shared by the options path and the shares path so the two can never
+        drift. Returns the refusal, or None to mean carry on."""
         if not self.ready:
             return Decision(False, "risk gate not initialised for a session")
 
@@ -174,9 +173,9 @@ class RiskGate:
         if self.loss_remaining <= 0:
             return Decision(False, "daily loss budget exhausted")
 
-        if not (contract_price > 0) or math.isnan(contract_price):
-            return Decision(False, f"no usable contract price ({contract_price!r})")
+        return None
 
+    def _stop_too_wide(self, sig: Signal) -> Decision | None:
         stop_pct = 100.0 * sig.risk_per_share / max(sig.entry, 1e-9)
         if stop_pct > self.limits.max_stop_distance_pct:
             return Decision(
@@ -184,6 +183,68 @@ class RiskGate:
                 f"stop is {stop_pct:.2f}% away, over the "
                 f"{self.limits.max_stop_distance_pct}% limit",
             )
+        return None
+
+    def can_open_shares(self, sig: Signal, price: float,
+                        minute_of_day_ny: int) -> Decision:
+        """Shares of the underlying, not option contracts.
+
+        This exists because the research harness measures the UNDERLYING, and
+        a shadow run has to trade the same instrument the statistics were
+        computed on. Sizing here is exact rather than conservative: the loss at
+        the stop is known, so risk budget / stop distance is the share count,
+        with no premium-versus-delta question to answer.
+
+        The options path stays the default for live trading -- see `can_open`
+        and the note on `sizing_mode`."""
+        blocked = self._pre_trade_gates(minute_of_day_ny)
+        if blocked is not None:
+            return blocked
+
+        if not (price > 0) or math.isnan(price):
+            return Decision(False, f"no usable price ({price!r})")
+
+        wide = self._stop_too_wide(sig)
+        if wide is not None:
+            return wide
+
+        risk = sig.risk_per_share
+        if not (risk > 0) or math.isnan(risk):
+            return Decision(False, f"stop distance is not usable ({risk!r})")
+
+        budget = self.budget_for_trade()
+        shares = int(budget // risk)
+
+        # Cash account, no margin: the position cannot cost more than equity.
+        # A tight stop otherwise sizes to a notional the account cannot pay for.
+        affordable = int(self.equity_at_open // price)
+        shares = min(shares, affordable)
+
+        if shares < 1:
+            return Decision(
+                False,
+                f"budget {budget:.2f} at a {risk:.2f} stop, and "
+                f"{self.equity_at_open:.2f} equity at {price:.2f}, "
+                f"will not cover one share",
+            )
+        return Decision(True, "ok", shares)
+
+    def can_open(self, sig: Signal, contract_price: float,
+                 minute_of_day_ny: int, delta: float = 0.5) -> Decision:
+        """May the bot open this position, and at what size?
+
+        `contract_price` is the option's ask in dollars per share (so a $1.50
+        quote costs $150 for one contract)."""
+        blocked = self._pre_trade_gates(minute_of_day_ny)
+        if blocked is not None:
+            return blocked
+
+        if not (contract_price > 0) or math.isnan(contract_price):
+            return Decision(False, f"no usable contract price ({contract_price!r})")
+
+        wide = self._stop_too_wide(sig)
+        if wide is not None:
+            return wide
 
         contracts = self.size(sig, contract_price, delta)
         if contracts < 1:
