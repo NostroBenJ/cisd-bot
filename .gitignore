@@ -23,3 +23,7 @@ data/paper_journal.jsonl
 
 # Scheduled-run logs
 logs/
+
+# Generated dashboard
+dashboard.html
+data/dashboard.json
