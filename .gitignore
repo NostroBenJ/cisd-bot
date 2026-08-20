@@ -17,3 +17,6 @@ data/shadow_journal.jsonl
 
 # Equity daily history, re-fetchable from Robinhood get_equity_historicals
 data/equities/
+
+# Paper trading journal
+data/paper_journal.jsonl

@@ -84,12 +84,101 @@ def backtest(px, mes, equity: float, cost_bp: float) -> tuple[list[float], float
     return monthly, prev_eq
 
 
+
+def submit(args) -> int:
+    """Rebalance the Alpaca PAPER account into the current decile.
+
+    Sizes off `--equity`, deliberately NOT off the account balance. A paper
+    account starts with $100,000; deploying all of it would test a strategy at
+    a size this trader will not have for years, and would hide exactly the
+    problems that bite at $1,000.
+
+    `AlpacaBroker()` defaults to paper and there is no flag here that reaches
+    live -- that path requires constructing the broker with a typed phrase, in
+    code, on purpose.
+    """
+    from bot.broker import AlpacaBroker
+    from bot.journal import Decision, Journal
+    import time
+
+    dates, px, _ = load_prices()
+    mes = month_ends(dates)
+    k = len(mes) - 1
+    picks = rank(px, mes, k)
+
+    # The gate is consulted even though this is paper -- and ESPECIALLY because
+    # it is. An unvalidated strategy belongs in paper; that is what paper is
+    # for. But the decision has to be made explicitly and printed, not skipped
+    # because the money happens to be fake. The first version of this function
+    # never called may_trade() at all, which quietly made the gate optional.
+    from bot.validation import Registry
+    name = f"cross_momentum_{FORM}_{SKIP}"
+    allowed, why = Registry.load("data/validation.json").may_trade(name)
+    print(f"\ngate: {name}")
+    print(f"  {'VALIDATED' if allowed else 'NOT VALIDATED'} -- {why}")
+    if not allowed:
+        print("  proceeding in PAPER only. This would be refused for live.")
+
+    broker = AlpacaBroker()                    # paper. always.
+    if broker.mode != "alpaca-paper" and not allowed:
+        raise PermissionError(
+            f"{name} has no passing validation record and this is not paper. "
+            f"Refusing: {why}"
+        )
+    acct = broker.account()
+    print(f"\naccount {broker.mode}  equity ${acct.equity:,.2f}  "
+          f"cash ${acct.cash:,.2f}  positions {len(acct.positions)}")
+
+    # The sleeve: what WE manage, not what the account holds. Grows with the
+    # strategy rather than being re-pegged to the starting figure each month.
+    held = sum(acct.positions.values())
+    sleeve = held / INVESTED if held > 0 else args.equity
+    print(f"sleeve  ${sleeve:,.2f}  (deploying {INVESTED:.0%})")
+
+    plan = rebalance(equal_weight(picks, INVESTED), acct.positions, sleeve)
+    if not plan.orders:
+        print("\nalready on target -- nothing to do")
+        for s in plan.skipped:
+            print(f"  skipped: {s}")
+        return 0
+
+    print(f"\n  {'sym':<7}{'side':>6}{'notional':>12}   reason")
+    for o in plan.orders:
+        print(f"  {o.symbol:<7}{o.side:>6}{o.notional:>12.2f}   {o.reason}")
+    print(f"\n  {len(plan.orders)} orders, ${plan.gross_traded:,.2f} gross, "
+          f"turnover {plan.turnover(sleeve):.1%}")
+
+    rep = execute(plan, broker, dry_run=False)
+    print(f"\n  submitted {len(rep.submitted)}   failed {len(rep.failed)}")
+    for o, why in rep.failed:
+        print(f"    {o.symbol} {o.side} {o.notional:.2f} -- {why[:90]}")
+    print(f"  reconcile: {rep.reconciled}")
+
+    j = Journal("data/paper_journal.jsonl")
+    for o in rep.submitted:
+        j.write(Decision(ts=int(time.time()), wall_ts=time.time(), symbol=o.symbol,
+                         signal=f"cross_momentum_{FORM}_{SKIP}",
+                         direction=1 if o.side == "buy" else -1,
+                         action=o.side, reason=o.reason, mode=broker.mode,
+                         price=float("nan"), shares=0,
+                         context={"notional": round(o.notional, 2),
+                                  "sleeve": round(sleeve, 2)}))
+    print(f"  journalled -> data/paper_journal.jsonl")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--backtest", action="store_true")
-    ap.add_argument("--equity", type=float, default=1000.0)
+    ap.add_argument("--submit", action="store_true",
+                    help="send the rebalance to the Alpaca PAPER account")
+    ap.add_argument("--equity", type=float, default=1000.0,
+                    help="sleeve size to deploy, NOT the account balance")
     ap.add_argument("--cost-bp", type=float, default=5.0)
     args = ap.parse_args()
+
+    if args.submit:
+        return submit(args)
 
     dates, px, spy = load_prices()
     mes = month_ends(dates)
