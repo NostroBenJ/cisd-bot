@@ -27,3 +27,6 @@ logs/
 # Generated dashboard
 dashboard.html
 data/dashboard.json
+
+# CRSP extracts - licensed data, never committed
+data/crsp/
