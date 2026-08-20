@@ -31,6 +31,7 @@ from research.cross_momentum import (DECILE, ann, load_prices, month_ends, ret,
                                      sharpe)
 
 FORM, SKIP = 12, 2          # the pre-registered winner from experiment 11
+JOURNAL = "data/paper_journal.jsonl"
 INVESTED = 0.98             # 2% cash buffer against fills worse than quoted
 
 
@@ -85,6 +86,22 @@ def backtest(px, mes, equity: float, cost_bp: float) -> tuple[list[float], float
 
 
 
+
+def _refresh() -> int:
+    """Run the price refresh in-process. Non-zero means do NOT trade.
+
+    A rebalance on stale or disputed prices is worse than no rebalance: it acts
+    with full confidence on data the system already knows it cannot trust."""
+    import sys as _s
+    argv = _s.argv
+    _s.argv = ["fetch_equities", "--days", "500"]
+    try:
+        from research.fetch_equities import main as m
+        return m()
+    finally:
+        _s.argv = argv
+
+
 def submit(args) -> int:
     """Rebalance the Alpaca PAPER account into the current decile.
 
@@ -99,7 +116,38 @@ def submit(args) -> int:
     """
     from bot.broker import AlpacaBroker
     from bot.journal import Decision, Journal
+    from research.fetch_equities import load_env
     import time
+
+    # A scheduled process does not inherit an interactive shell environment,
+    # so credentials are loaded from .env here rather than assumed present.
+    load_env()
+
+    # DAILY schedule, MONTHLY action. Running every weekday and deciding
+    # internally whether a rebalance is due is far more robust than asking the
+    # OS scheduler for "last trading day of the month": holidays, weekends and
+    # a laptop that was asleep all resolve themselves, and a missed month is
+    # picked up on the next run instead of being silently skipped.
+    if args.if_due:
+        # A month counts as done only on a CLEAN rebalance. The first live run
+        # had one order rejected out of eleven, and marking the month complete
+        # on partial success would have left the account holding a name the
+        # strategy had already dropped -- with the scheduler declining to fix
+        # it for another month.
+        done = {r.get("context", {}).get("month")
+                for r in Journal(JOURNAL).read()
+                if r.get("action") == "rebalance" and r.get("reason") == "complete"}
+        this_month = time.strftime("%Y-%m")
+        if this_month in done:
+            print(f"rebalance for {this_month} already complete -- nothing to do")
+            return 0
+        print(f"rebalance for {this_month} is due")
+
+    if args.refresh:
+        print("refreshing prices from Alpaca...")
+        if _refresh():
+            print("REFUSING to rebalance: the price refresh reported a problem.")
+            return 1
 
     dates, px, _ = load_prices()
     mes = month_ends(dates)
@@ -133,6 +181,14 @@ def submit(args) -> int:
     # strategy rather than being re-pegged to the starting figure each month.
     held = sum(acct.positions.values())
     sleeve = held / INVESTED if held > 0 else args.equity
+    if args.force_sleeve:
+        # Inferring the sleeve from holdings is right only while holdings are
+        # exactly the target set. A failed exit breaks that: the orphan counts
+        # as ours, the sleeve inflates, and the remaining names get funded to a
+        # higher target out of account cash. That happened on the first live
+        # rebalance and cost $77 of unintended deployment. This resets it.
+        print(f"  forcing sleeve {sleeve:,.2f} -> {args.force_sleeve:,.2f}")
+        sleeve = args.force_sleeve
     print(f"sleeve  ${sleeve:,.2f}  (deploying {INVESTED:.0%})")
 
     plan = rebalance(equal_weight(picks, INVESTED), acct.positions, sleeve)
@@ -154,7 +210,7 @@ def submit(args) -> int:
         print(f"    {o.symbol} {o.side} {o.notional:.2f} -- {why[:90]}")
     print(f"  reconcile: {rep.reconciled}")
 
-    j = Journal("data/paper_journal.jsonl")
+    j = Journal(JOURNAL)
     for o in rep.submitted:
         j.write(Decision(ts=int(time.time()), wall_ts=time.time(), symbol=o.symbol,
                          signal=f"cross_momentum_{FORM}_{SKIP}",
@@ -162,9 +218,20 @@ def submit(args) -> int:
                          action=o.side, reason=o.reason, mode=broker.mode,
                          price=float("nan"), shares=0,
                          context={"notional": round(o.notional, 2),
-                                  "sleeve": round(sleeve, 2)}))
-    print(f"  journalled -> data/paper_journal.jsonl")
-    return 0
+                                  "sleeve": round(sleeve, 2),
+                                  "month": time.strftime("%Y-%m")}))
+    # The completion marker. Written only when nothing failed, and it is what
+    # --if-due reads.
+    status = "complete" if rep.ok else f"partial: {len(rep.failed)} failed"
+    j.write(Decision(ts=int(time.time()), wall_ts=time.time(), symbol="-",
+                     signal=f"cross_momentum_{FORM}_{SKIP}", direction=0,
+                     action="rebalance", reason=status, mode=broker.mode,
+                     context={"month": time.strftime("%Y-%m"),
+                              "submitted": len(rep.submitted),
+                              "failed": len(rep.failed),
+                              "sleeve": round(sleeve, 2)}))
+    print(f"  journalled -> {JOURNAL}   [{status}]")
+    return 0 if rep.ok else 1
 
 
 def main() -> int:
@@ -175,6 +242,12 @@ def main() -> int:
     ap.add_argument("--equity", type=float, default=1000.0,
                     help="sleeve size to deploy, NOT the account balance")
     ap.add_argument("--cost-bp", type=float, default=5.0)
+    ap.add_argument("--force-sleeve", type=float, default=0.0,
+                    help="override the inferred sleeve (use after a failed exit)")
+    ap.add_argument("--if-due", action="store_true",
+                    help="with --submit: act only if this month has no rebalance yet")
+    ap.add_argument("--refresh", action="store_true",
+                    help="with --submit: refresh prices from Alpaca first")
     args = ap.parse_args()
 
     if args.submit:

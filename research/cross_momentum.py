@@ -40,6 +40,23 @@ from collections import defaultdict
 from pathlib import Path
 
 STORE = Path("data/equities")
+
+# Names whose price history we cannot trust, with the reason. Checked by
+# research/fetch_equities.py, which cross-checks every refresh against what is
+# already on disk and refuses to overwrite a disagreement.
+#
+# Both of these had SPINOFFS in 2026. A spinoff is not a split, so a
+# split-adjusted series carries an artificial one-day drop -- 17.8% for FDX,
+# 50.9% for HON on the Alpaca feed. A 50% phantom move puts a name at the very
+# top or very bottom of a momentum ranking for a full year.
+#
+# Excluding them is itself a mild selection effect: spinoffs are corporate
+# events, so this drops a non-random slice of the universe. Two names out of a
+# hundred, recorded rather than hidden. CRSP resolves it properly.
+EXCLUDE = {
+    "FDX": "FedEx Freight spinoff 2026-06-01; sources disagree by 18%",
+    "HON": "Honeywell separation 2026-06; both feeds discontinuous",
+}
 DECILE = 10          # names held
 NULL_SEEDS = 200     # random-decile draws
 FORMATIONS = [(6, 1), (12, 1), (12, 2)]
@@ -55,7 +72,7 @@ def load_prices() -> tuple[list[str], dict[str, dict[str, float]], dict[str, flo
         series = {r["date"]: float(r["close"]) for r in rows}
         if p.stem == "_SPY":
             spy = series
-        else:
+        elif p.stem not in EXCLUDE:
             px[p.stem] = series
     dates = sorted(set().union(*(set(s) for s in px.values())))
     return dates, px, spy

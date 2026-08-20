@@ -138,6 +138,16 @@ class AlpacaBroker:
         from alpaca.trading.enums import OrderSide, TimeInForce
         from alpaca.trading.requests import MarketOrderRequest
 
+        # A FULL EXIT closes by position, never by notional. A notional sell is
+        # converted to shares at the CURRENT price, so a position that has
+        # fallen since the plan was built implies more shares than are held and
+        # the order is rejected outright -- which is exactly what happened on
+        # the first live rebalance (FDX, "insufficient qty available"). The
+        # broker already knows the exact quantity; ask it to close.
+        if order.reason.startswith("exit"):
+            self._client().close_position(order.symbol)
+            return
+
         req = MarketOrderRequest(
             symbol=order.symbol,
             notional=round(order.notional, 2),
