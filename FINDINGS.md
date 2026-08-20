@@ -292,6 +292,53 @@ the reason the null exists.
 new parameters after seeing this table is the search this experiment was
 designed to avoid.
 
+## 11 · Cross-sectional momentum — the best result yet, and still short of the bar
+
+`python -m research.cross_momentum [cost_bp]` · 100 US large caps, 92 month-ends,
+2019-01 → 2026-08. Daily history pulled from Robinhood `get_equity_historicals`
+(1,918 bars each, split-adjusted, no gaps, no zero-volume days).
+
+The Jegadeesh-Titman strategy: rank on past return, hold the winners, rebalance
+monthly. Long-only decile, because the account cannot short.
+
+**The null is the equal-weighted universe, not zero** — holding any ten of these
+hundred earns the market. 200 random 10-name draws per month, compared PAIRED,
+because both portfolios carry the same beta and an unpaired test drowns the
+difference in market noise.
+
+| formation | n | annualised | SR | vs null | paired t vs null | paired t vs SPY |
+|---|---:|---:|---:|---:|---:|---:|
+| 6-1 | 85 | +18.39% | 0.83 | +5.48% | +0.98 | +0.79 |
+| 12-1 | 79 | +22.00% | 0.96 | +9.01% | +1.45 | +1.40 |
+| **12-2** | **79** | **+26.75%** | **1.11** | **+13.77%** | **+2.13** | **+2.12** |
+
+Benchmarks: equal-weight universe +14.27%/yr (SR 0.82), SPY +14.15% (SR 0.86).
+
+**This is the strongest signal the project has found.** It also **does not pass**:
+
+- t = **+2.13** against a **2.5** bar, and Bonferroni for 3 tests needs **2.39**.
+- n = 79 months. `MIN_TRADES` is 200.
+- It *does* survive concentration (2.13 → 1.86 dropping the best month) and
+  split-half (first 1.32, second 1.66, same sign) — the two tests that killed
+  earlier candidates.
+- The ordering 12-2 > 12-1 > 6-1 is monotone and matches the literature, which
+  is weak corroboration but not evidence.
+
+The validation gate correctly refuses it. That is the architecture working.
+
+**Known upward bias, unremovable here.** The universe is 100 end-2018 large caps
+chosen from memory, and **all 100 still trade** — ~100% survivorship. A
+point-in-time universe would contain acquired and collapsed names. Levels are
+overstated; only the paired difference is worth reading, and only relatively.
+
+**The binding practical constraint.** One share of each of today's top ten costs
+**$3,589.71** — over 3× the intended account. Expressing a ten-name decile at
+$1,000 requires fractional shares, or the portfolio collapses to three or four
+names and loses the diversification that makes decile momentum work at all.
+
+**Verdict: suggestive, not validated.** The first candidate worth re-testing
+rather than abandoning — on a real point-in-time universe, with more history.
+
 ## What is settled
 
 **Simple price-pattern prediction of SPY intraday direction does not work.**
