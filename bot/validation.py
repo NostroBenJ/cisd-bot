@@ -50,6 +50,12 @@ class ValidationRecord:
     stop_atr: float = 2.0
     target_atr: float = 2.0
 
+    # "signal"    -- per-trade, scored in R multiples against a random-entry null
+    # "portfolio" -- periodic rebalance, scored per period against a random-basket
+    #                null. The thresholds mean different things, so the kind is
+    #                recorded rather than inferred.
+    kind: str = "signal"
+
     notes: str = ""
 
     def failures(self) -> list[str]:
