@@ -4,9 +4,16 @@
     python -m research.wrds_pull --pull           # extract CRSP monthly
     python -m research.wrds_pull --pull --start 1990-01-01
 
-**One-time setup, which you must run yourself in a terminal:**
+**Interpreter:** run this with the 3.12 environment
+(`Downloads/crossdesk/.venv-qlib/Scripts/python.exe`). On Python 3.14 the
+driver segfaults (exit 139, no output) on any `raw_sql` result, even one
+year; `list_libraries` works, which makes the probe misleading.
 
-    python -c "import wrds; wrds.Connection()"
+**One-time setup:** `tools/wrds_setup.py` (a window with a visible password
+box) writes `%APPDATA%\postgresql\pgpass.conf`. The console prompt below
+also works but hides what you type:
+
+    python -c "import wrds; wrds.Connection(wrds_username='<your WRDS username>')"
 
 It prompts for your WRDS username and password, offers to create a `.pgpass`
 file, and after that every connection is passwordless. Say yes to the pgpass
@@ -47,20 +54,28 @@ firm enters and leaves as it actually did.
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import sys
 
 OUT = pathlib.Path("data/crsp")
 
+# The names join extends `nameendt` to the END OF ITS MONTH. msf rows are
+# dated at month end, but the final name record of a delisted stock ends on
+# the delisting day, so with a plain `a.date <= nameendt` the delisting
+# month's row -- the one carrying dlret -- fails the join and is dropped by
+# the WHERE on b.shrcd. Measured on 1990: 515 delistings, 49 kept by the
+# plain join, all 515 by this one. Overlapping name records can then match
+# twice; `pull` de-duplicates on (permno, date) keeping the latest record.
 MONTHLY_SQL = """
 SELECT a.permno, a.date, a.ret, a.prc, a.shrout,
-       b.shrcd, b.exchcd, b.ticker, b.comnam,
+       b.shrcd, b.exchcd, b.ticker, b.comnam, b.namedt,
        c.dlret, c.dlstcd
 FROM {msf} AS a
 LEFT JOIN {names} AS b
        ON a.permno = b.permno
       AND b.namedt <= a.date
-      AND a.date <= b.nameendt
+      AND a.date <= (date_trunc('month', b.nameendt) + interval '1 month' - interval '1 day')::date
 LEFT JOIN {delist} AS c
        ON a.permno = c.permno
       AND date_trunc('month', a.date) = date_trunc('month', c.dlstdt)
@@ -70,10 +85,16 @@ WHERE a.date BETWEEN '{start}' AND '{end}'
 """
 
 
+#: The WRDS account name. The client defaults to the OS username, which is
+#: not the WRDS one, and a pgpass entry is matched on username -- so without
+#: this the saved credentials are never consulted and the client prompts.
+WRDS_USER = os.environ.get("WRDS_USER", "")
+
+
 def connect():
     import wrds
     try:
-        return wrds.Connection()
+        return wrds.Connection(wrds_username=WRDS_USER)
     except Exception as e:                       # noqa: BLE001
         print(f"could not connect: {type(e).__name__}: {e}\n")
         print("Run this ONCE in your own terminal, then re-run:")
@@ -106,7 +127,21 @@ def probe() -> int:
     return 0
 
 
-def pull(start: str, end: str) -> int:
+def _year_chunks(start: str, end: str, years: int):
+    y0, y1 = int(start[:4]), int(end[:4])
+    y = y0
+    while y <= y1:
+        a = f"{y}-01-01" if y > y0 else start
+        b_year = min(y + years - 1, y1)
+        b = f"{b_year}-12-31" if b_year < y1 else end
+        yield a, b
+        y = b_year + 1
+
+
+def pull(start: str, end: str, chunk_years: int = 3) -> int:
+    """Pull in year chunks. One 36-year query segfaulted the driver on 3.14
+    (exit 139, no output); a few years at a time is well inside what it
+    handles, and each chunk is written as it lands so a crash costs one."""
     import pandas as pd
     db = connect()
     libs = db.list_libraries()
@@ -115,11 +150,28 @@ def pull(start: str, end: str) -> int:
         print(f"no CRSP library found. Entitled: {sorted(libs)[:25]}")
         return 1
 
-    sql = MONTHLY_SQL.format(msf=f"{lib}.msf", names=f"{lib}.msenames",
-                             delist=f"{lib}.msedelist", start=start, end=end)
-    print(f"querying {lib}.msf {start} -> {end} ... (this takes a few minutes)")
-    df = db.raw_sql(sql, date_cols=["date"])
-    print(f"{len(df):,} rows, {df.permno.nunique():,} unique PERMNOs")
+    OUT.mkdir(parents=True, exist_ok=True)
+    parts = []
+    for a, b in _year_chunks(start, end, chunk_years):
+        part = OUT / f"chunk_{a[:4]}_{b[:4]}.csv"
+        if part.exists():
+            print(f"  {a} -> {b}: cached", flush=True)
+            parts.append(pd.read_csv(part, parse_dates=["date"]))
+            continue
+        sql = MONTHLY_SQL.format(msf=f"{lib}.msf", names=f"{lib}.msenames",
+                                 delist=f"{lib}.msedelist", start=a, end=b)
+        print(f"  {a} -> {b}: querying ...", end=" ", flush=True)
+        chunk = db.raw_sql(sql, date_cols=["date"])
+        chunk.to_csv(part, index=False)
+        print(f"{len(chunk):,} rows", flush=True)
+        parts.append(chunk)
+    df = pd.concat(parts, ignore_index=True)
+    before = len(df)
+    df = (df.sort_values(["permno", "date", "namedt"])
+            .drop_duplicates(["permno", "date"], keep="last")
+            .reset_index(drop=True))
+    print(f"{len(df):,} rows ({before - len(df):,} duplicate name-record matches dropped), "
+          f"{df.permno.nunique():,} unique PERMNOs", flush=True)
 
     # THE delisting adjustment. A firm that is acquired or fails has a final
     # partial return that lives in dlret, not ret. Dropping it is the bias this
@@ -136,13 +188,8 @@ def pull(start: str, end: str) -> int:
 
     df["mktcap"] = df["prc"].abs() * df["shrout"]      # prc<0 means bid/ask midpoint
 
-    OUT.mkdir(parents=True, exist_ok=True)
-    p = OUT / "crsp_monthly.parquet"
-    try:
-        df.to_parquet(p, index=False)
-    except Exception:                            # noqa: BLE001 - pyarrow missing
-        p = OUT / "crsp_monthly.csv"
-        df.to_csv(p, index=False)
+    p = OUT / "crsp_monthly.csv"
+    df.to_csv(p, index=False)
     print(f"wrote {p}  ({p.stat().st_size / 1e6:.1f} MB)")
 
     print(f"\ndelisting events with a return: {df['dlret'].notna().sum():,}")
@@ -161,11 +208,12 @@ def main() -> int:
     ap.add_argument("--pull", action="store_true")
     ap.add_argument("--start", default="1990-01-01")
     ap.add_argument("--end", default="2026-12-31")
+    ap.add_argument("--chunk-years", type=int, default=3)
     a = ap.parse_args()
     if a.probe:
         return probe()
     if a.pull:
-        return pull(a.start, a.end)
+        return pull(a.start, a.end, a.chunk_years)
     ap.print_help()
     return 0
 
