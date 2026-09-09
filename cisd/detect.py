@@ -61,6 +61,9 @@ class RejectionBlock:
     # and re-arm. The counter in EngineStats tracks BLOCKS, not arming events,
     # so the funnel formed >= confirmed >= armed >= triggered stays a funnel.
     ever_armed: bool = False
+    # Base-timeframe index of the last bar that touched the zone. Drives the
+    # "touch_window" arming rule; -1 until the first touch.
+    last_touch_index: int = -1
     tapped: bool = False
     active: bool = True
 
@@ -162,6 +165,13 @@ def cisd_close(
 
     close = bars[i].close
     fired = close > level if bull else close < level
+    if fired and cfg.cisd_first_close and i >= 1:
+        # The FIRST close through the level, not any close beyond it. The
+        # previous bar must have closed on the other side; if it was part of
+        # the run this holds automatically (it closed below its own open,
+        # which is at or below the run's initiating open).
+        prev = bars[i - 1].close
+        fired = prev <= level if bull else prev >= level
     return fired, level
 
 

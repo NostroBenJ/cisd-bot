@@ -190,6 +190,20 @@ class Config:
     # price INTO the swing extreme. The Pine accepts any recent opposing run.
     # "pine" reproduces the Pine, "swing_anchored" enforces the strict reading.
     cisd_mode: str = "pine"
+    # fix: the Pine fires the trigger on ANY close past the initiating open
+    # inside the lookback, so a bar that merely stays beyond a level crossed
+    # bars ago counts as a change of state again -- and a block that arms
+    # after the real crossing enters on a pullback with no confirmation at
+    # all. True requires the FIRST close through the level: the previous bar
+    # closed on the other side. Applies to the bias (`cisd_direction`) too,
+    # which otherwise re-sets itself on every bar past the level.
+    cisd_first_close: bool = True
+    # fix: the Pine disarms a block the first bar price steps out of the zone
+    # without firing, so a two-candle change of state off the tap can never
+    # trigger. "touch_window" keeps a tap armed for `cisd_lookback` bars after
+    # the last touch -- the same window the trigger scans. "pine" reproduces
+    # the original.
+    armed_mode: str = "touch_window"
 
     # ── 15 · grade weights ──────────────────────────────────────────────────
     w_sweep: float = 16.0
@@ -306,6 +320,8 @@ def pine_bug_compat(cfg: Config | None = None) -> Config:
         unify_atr_timeframe=False,       # mismatched ATR scales restored
         quota_resets_at_session=False,   # quota rolls at midnight again
         smt_max_age_bars=10_000,         # no cap on stale SMT
+        cisd_first_close=False,          # trigger re-fires on any close past the level
+        armed_mode="pine",               # disarm the bar price leaves the zone
         use_volume=False,
         use_vwap=False,
         use_gamma=False,

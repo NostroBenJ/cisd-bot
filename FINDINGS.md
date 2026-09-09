@@ -379,3 +379,84 @@ loader, VRP study; 34 checks (`verify_research.py`)
 **Robinhood has no official public REST API** for equities or options. Only the
 Crypto Trading API and the **agentic MCP** (already connected). The unofficial
 reverse-engineered endpoints are unsupported and break without notice.
+
+## 9 · v30 (2026-09-08): the defects fixed in the Pine itself, then re-measured
+
+`python backtest_v30.py` -- three builds of the same model over every archived
+1-minute SPY session (2022-07-11 to 2026-08-12, 1,032 sessions), scored by
+`ablation.evaluate` (entry at signal close, first touch of stop / target-1 in
+the session, both-in-one-bar = stop, 0.02 ATR friction), against a random-entry
+null at the nearest ATR structure (2.0 ATR stop / 3 R target: mean -0.005 R).
+Full table in `results/summary.txt`; trade lists in `results/*.json`.
+
+| build | what it is | sigs | /yr | win | mean R net | se | t vs null | drop best |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| v29 | the Pine as run, all defects | 48 | 11.7 | 17% | -0.42 | 0.19 | -2.11 | -0.52 |
+| aug6 | + the six August fixes | 43 | 10.5 | 30% | +0.04 | 0.27 | +0.17 | -0.13 |
+| v30 | + first-close trigger, touch-window arming | 55 | 13.5 | 35% | +0.23 | 0.27 | +0.87 | +0.10 |
+
+Two of the nine fixes were only found on 2026-09-08 (`config.cisd_first_close`,
+`config.armed_mode`; verify `[23]`): the trigger re-fired on any close still
+past the initiating open, and a tap disarmed the bar price stepped out of the
+zone. Both are in `tools/CISD_Powell_RB_v30.pine` and in the port.
+
+**Reading.** Fixing the code moved the mean from -0.42 R to +0.23 R, and the
+defects were real: v29 shares only 24 of its 48 signal bars with v30. But
+t = +0.87 against the null is not evidence of anything. At 13.5 signals a year
+and se 0.27, a true +0.23 R would need ~290 trades (about twenty years) to
+reach t = 2. The sample is too small to distinguish this from random entries
+with the same exits, in either direction. Shorts are flat (+0.02); the whole
+positive mean is 24 longs at +0.50 -- which is also what the 2022-2026 drift
+would produce. Not a green light; a "no longer demonstrably negative".
+
+Caveats carried from before: underlying leg, not options; SMT unavailable
+(SPY-only archive); the `confirmed` funnel column read 0 in these runs because
+HTF blocks were pre-confirmed without being counted (fixed in `_intake` after
+the runs started; cosmetic).
+
+## 10 · v30, split-sample (2026-09-08): can the gates be loosened into a strategy?
+
+`research_v30.py`. The archive was cut once: **is** 2022-07-11..2024-12-31
+(627 sessions) for selection, **oos** 2025-01-02..2026-08-12 (405 sessions)
+for one confirmation. Same scoring and null as section 9. Engine made ~10x
+faster first (pointer lookup for the block ATR, memoised timezone
+conversion); the 4-year v30 signal set is byte-identical before and after.
+
+**In-sample, 18 single changes + 3 declared combinations (21 trials).**
+Most gates do not bind: grade, anchor, bias, stack, DOL, anti-stack, quota
+and strong-close each move the count by 0-4 signals. The count is set by the
+formation rules (body >= 45%, minimum sweep distance) and the timeframe set
+(no 1-minute blocks). Removing the CISD trigger triples the count and halves
+the win rate (16%), so the trigger is doing real work.
+
+| is | sigs | r_net | se | t vs null | drop1 |
+|---|---:|---:|---:|---:|---:|
+| base (v30) | 31 | +0.45 | 0.36 | +1.24 | +0.29 |
+| no_min_sweep | 40 | +0.67 | 0.38 | +1.78 | +0.49 |
+| sweep_1m (no min sweep + 1m blocks) | 67 | +0.48 | 0.25 | **+1.85** | +0.36 |
+| wide (+ body 30%) | 105 | +0.24 | 0.18 | +1.40 | +0.16 |
+| wide_open (all gates off) | 230 | +0.07 | -- | -- | -- |
+
+The best in-sample t is +1.85; the expected best of 21 noise draws is +1.8.
+Nothing in-sample cleared the floor that the number of trials sets.
+
+**Out-of-sample, 3 looks (base pre-registered; sweep_1m and wide selected
+in-sample):**
+
+| oos | sigs | /yr | win | r_net | se | t vs null | longs | shorts |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| base (v30) | 24 | 14.9 | 29% | -0.06 | 0.39 | -0.13 | +0.38 | -0.58 |
+| sweep_1m | 48 | 29.9 | 29% | -0.09 | 0.24 | -0.35 | +0.14 | -0.32 |
+| wide | 81 | 50.4 | 27% | -0.18 | 0.17 | -1.00 | -0.11 | -0.24 |
+
+**Verdict: no configuration survives.** Every out-of-sample mean is at or
+below the random-entry null. The shorts that carried the in-sample means
+(+0.35 to +0.74) reversed to -0.24 to -0.58 out of sample, which is the
+signature of a regime fit, not an edge. Widening the sample only makes the
+negative more precise. The exit sweep on the in-sample base was positive at
+every target distance and the same signals were flat-to-negative out of
+sample, so the harvest was never the problem.
+
+Trial count on this archive is now 24 (21 is + 3 oos), plus the ~20 earlier
+TradingView configurations. Further tuning on these bars is not research.
+

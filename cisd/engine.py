@@ -424,7 +424,7 @@ class CisdEngine:
             past_open_noise = bar.minute_of_day_ny >= (9 * 60 + 30 + cfg.skip_first_minutes)
             sig = self._advance(
                 base_bars, i, bar, dr, pools, fvgs, gaps, keyopens, bias, smt,
-                base_atr[i], vwap[i], rvol[i], atrs, series,
+                base_atr[i], vwap[i], rvol[i], atrs, tf_ptr,
             )
             if sig is not None:
                 blocked = self.events.blocked(bar.ts)
@@ -531,6 +531,11 @@ class CisdEngine:
             return
 
         self.blocks.append(blk)
+        # A block pre-confirmed at intake (displacement not required, or a
+        # higher-timeframe block) still counts as confirmed, so the funnel
+        # formed >= confirmed >= armed holds on real multi-timeframe runs.
+        if blk.confirmed:
+            self.stats.blocks_confirmed += 1
         self.stats.blocks_formed += 1
         if len(self.blocks) > cfg.max_live_blocks:
             self.blocks.pop(0)
@@ -571,7 +576,7 @@ class CisdEngine:
 
     def _advance(
         self, base_bars, i, bar, dr, pools, fvgs, gaps, keyopens, bias, smt,
-        base_atr_v, vwap_v, rvol_v, atrs, series,
+        base_atr_v, vwap_v, rvol_v, atrs, tf_ptr,
     ) -> Signal | None:
         """Advance every live block one bar and return the best signal, if any."""
         cfg = self.cfg
@@ -584,7 +589,7 @@ class CisdEngine:
             if not z.active:
                 continue
 
-            block_atr = self._block_atr(z, atrs, series, bar.ts, base_atr_v)
+            block_atr = self._block_atr(z, atrs, tf_ptr, base_atr_v)
             bars_alive = self._bars_alive(z, bar, cfg)
 
             # 1 · displacement confirmation
@@ -620,6 +625,7 @@ class CisdEngine:
 
             # 4 · price returned into the zone -> armed
             if z.contains(bar):
+                z.last_touch_index = i
                 if not z.armed:
                     z.armed = True
                     if not z.ever_armed:
@@ -649,31 +655,42 @@ class CisdEngine:
                     if sig is not None and (best is None or sig.score > best[0]):
                         best = (sig.score, sig)
 
-            # 6 · disarm only after the trigger has had its chance
+            # 6 · disarm only after the trigger has had its chance.
+            #
+            # "pine": disarm the bar price leaves the zone, so the change of
+            # state must close on the very next bar or the tap is wasted.
+            # "touch_window": stay armed for `cisd_lookback` bars after the
+            # last touch -- the window the trigger itself scans -- so a
+            # two-candle change of state off the tap can fire.
             if z.armed and not z.tapped:
-                left = bar.low > z.top if z.bull else bar.high < z.bottom
-                if left:
+                if cfg.armed_mode == "pine":
+                    left = bar.low > z.top if z.bull else bar.high < z.bottom
+                    if left:
+                        z.armed = False
+                elif (i - z.last_touch_index) > cfg.cisd_lookback:
                     z.armed = False
 
         return best[1] if best else None
 
-    def _block_atr(self, z, atrs, series, ts, fallback) -> float:
+    def _block_atr(self, z, atrs, tf_ptr, fallback) -> float:
         """ATR on the block's own timeframe when unified, else the base ATR.
 
         The Pine mixes these -- sweep distance uses the block's timeframe while
         displacement uses the chart's -- which makes the two multipliers
-        incomparable and untunable together."""
+        incomparable and untunable together.
+
+        `tf_ptr[tf]` is the index of the next UNCLOSED bar on that timeframe,
+        maintained by `run`, so the last closed bar is `tf_ptr[tf] - 1`. This
+        replaced a backward scan from the end of the whole series, which made a
+        run quadratic in its length (a four-year run spent most of its time
+        here)."""
         if not self.cfg.unify_atr_timeframe:
             return fallback
-        s = series.get(z.timeframe)
         a = atrs.get(z.timeframe)
-        if not s or not a:
+        ptr = tf_ptr.get(z.timeframe)
+        if not a or ptr is None:
             return fallback
-        idx = 0
-        for j in range(len(s) - 1, -1, -1):
-            if s[j].ts + z.timeframe * 60 <= ts:
-                idx = j
-                break
+        idx = max(0, ptr - 1)
         v = a[idx] if idx < len(a) else math.nan
         return fallback if math.isnan(v) else v
 

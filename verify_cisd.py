@@ -72,7 +72,8 @@ def _noise_bar(ts: int, price: float, rng: random.Random, vol_mult: float = 1.0)
     return Bar(ts, o, hi, lo, c, (40_000 + rng.random() * 40_000) * vol_mult)
 
 
-def _scripted_setup(t0: datetime, p: float, prior_low: float, bull: bool) -> list[Bar]:
+def _scripted_setup(t0: datetime, p: float, prior_low: float, bull: bool,
+                    pause_before_cisd: bool = False) -> list[Bar]:
     """The textbook sequence, constructed so the engine MUST find it.
 
     A pure random walk essentially never produces sweep -> displace -> leave ->
@@ -147,16 +148,33 @@ def _scripted_setup(t0: datetime, p: float, prior_low: float, bull: bool) -> lis
                    min(r2_open, r2_close, r2_far), r2_close, 95_000))
     m += 1
 
+    # 5b · optional: one bar that steps OUT of the zone without closing
+    #      through r1's open. The Pine disarms here; the corrected build keeps
+    #      the tap armed for `cisd_lookback` bars. The change-in-state bar
+    #      that follows then deliberately does NOT touch the zone, so it can
+    #      only fire from the standing arm, never from a fresh tap.
+    if pause_before_cisd:
+        # Opens ABOVE the zone top (the sweep bar's body edge at p - 0.35), so
+        # the whole bar sits outside the zone and the Pine rule must disarm.
+        pz_open = p - s * 0.30
+        pz_close = p
+        bars.append(mk(m, pz_open,
+                       max(pz_open, pz_close, p - s * 0.30, p + s * 0.05),
+                       min(pz_open, pz_close, p - s * 0.30, p + s * 0.05),
+                       pz_close, 60_000))
+        m += 1
+
     # 6 · the change-in-state close, back through r1's open
-    c_open = r2_close
+    c_open = p if pause_before_cisd else r2_close
     c_close = p + s * 0.15
-    c_far = p - s * 0.50
+    c_far = (p - s * 0.05) if pause_before_cisd else (p - s * 0.50)
     bars.append(mk(m, c_open, max(c_open, c_close, c_far),
                    min(c_open, c_close, c_far), c_close, 200_000))
     return bars
 
 
-def make_bars(n_days: int = 12, seed: int = 7, scripted: bool = True) -> list[Bar]:
+def make_bars(n_days: int = 12, seed: int = 7, scripted: bool = True,
+              pause_before_cisd: bool = False) -> list[Bar]:
     """Deterministic intraday bars: noise, with a scripted setup each morning.
 
     Setups alternate long and short day to day, and each one sweeps the
@@ -200,7 +218,8 @@ def make_bars(n_days: int = 12, seed: int = 7, scripted: bool = True) -> list[Ba
             # walk price to just inside the extreme we are about to sweep
             anchor = (prev_low + 0.55) if bull else (prev_high - 0.55)
             seq = _scripted_setup(start + timedelta(minutes=lead), anchor,
-                                  prev_low if bull else prev_high, bull)
+                                  prev_low if bull else prev_high, bull,
+                                  pause_before_cisd=pause_before_cisd)
             day_bars.extend(seq)
             price = seq[-1].close
             m = lead + len(seq)
@@ -922,6 +941,75 @@ def t19_engine_consistency() -> None:
           f"{len(bad_r)} mismatches")
 
 
+# ── [23] v30 fixes: first-close trigger and touch-window arming ─────────────
+
+
+def t23_v30_fixes() -> None:
+    print("\n[23] v30 fixes: first close through the level; armed window")
+    from cisd.detect import cisd_direction
+
+    first = Config(cisd_lookback=4, cisd_min_run=2, cisd_first_close=True)
+    anyc = replace(first, cisd_first_close=False)
+
+    # Two down bars (initiating open 110), an up bar that ALREADY closed
+    # through 110, then another up bar still above it. Bar 3 is a stale
+    # re-fire: the change of state happened on bar 2.
+    bs = [
+        bar(0, 110, 110.5, 107, 108),
+        bar(60, 108, 108.5, 105, 106),
+        bar(120, 106, 112, 105.5, 111),
+        bar(180, 111, 113, 110, 112.5),
+    ]
+    f2, _ = cisd_close(bs, 2, True, first)
+    f3, _ = cisd_close(bs, 3, True, first)
+    f3_any, _ = cisd_close(bs, 3, True, anyc)
+    check("first close through the level fires", f2)
+    check("a later bar that merely stays past the level does not", not f3)
+    check("the Pine-compat switch restores the stale re-fire", f3_any)
+    check("bias direction follows the same rule",
+          cisd_direction(bs, 3, replace(first, bias_cisd_lookback=4)) == 0
+          and cisd_direction(bs, 3, replace(anyc, bias_cisd_lookback=4)) == 1)
+
+    # Bearish mirror: two up bars (initiating open 100), a down bar through it,
+    # then a down bar still below.
+    up = [
+        bar(0, 100, 103, 99.5, 102),
+        bar(60, 102, 105, 101.5, 104),
+        bar(120, 104, 106, 99, 99.5),
+        bar(180, 99.5, 100.5, 97, 98),
+    ]
+    b2, _ = cisd_close(up, 2, False, first)
+    b3, _ = cisd_close(up, 3, False, first)
+    b3_any, _ = cisd_close(up, 3, False, anyc)
+    check("bearish mirror: first close fires, stale re-fire does not, compat restores it",
+          b2 and not b3 and b3_any)
+
+    # Armed window, engine level. With a bar that steps out of the zone
+    # between the tap and the change-of-state close, the Pine rule has
+    # disarmed by the time the trigger bar arrives; the touch window has not.
+    # The trigger bar does not touch the zone, so a fresh tap cannot rescue
+    # the Pine rule.
+    paused = make_bars(n_days=8, pause_before_cisd=True)
+    plain = make_bars(n_days=8)
+    n_touch = len(CisdEngine(Config(), symbol="SPY").run(paused))
+    n_pine = len(CisdEngine(replace(Config(), armed_mode="pine"), symbol="SPY").run(paused))
+    n_touch_plain = len(CisdEngine(Config(), symbol="SPY").run(plain))
+    n_pine_plain = len(CisdEngine(replace(Config(), armed_mode="pine"), symbol="SPY").run(plain))
+    check("touch window fires on a change of state one bar after leaving the zone",
+          n_touch >= 1, f"{n_touch} signals")
+    check("the Pine rule loses those setups", n_pine < n_touch, f"pine {n_pine} vs window {n_touch}")
+    check("the Pine rule still finds the textbook setup with no pause", n_pine_plain >= 1,
+          f"{n_pine_plain} signals")
+    check("touch window never fires fewer than the Pine rule on the same bars",
+          n_touch_plain >= n_pine_plain, f"window {n_touch_plain} vs pine {n_pine_plain}")
+
+    # Both branches: the paused setups alternate long/short by day, so the
+    # window's recovered signals must include both directions.
+    sigs = CisdEngine(Config(), symbol="SPY").run(paused)
+    dirs = {s.direction for s in sigs}
+    check("recovered signals include both long and short", dirs == {"long", "short"}, f"{dirs}")
+
+
 # ── [20] determinism ────────────────────────────────────────────────────────
 
 
@@ -1186,6 +1274,7 @@ def main() -> int:
     t20_determinism()
     t21_risk()
     t22_tv_import()
+    t23_v30_fixes()
 
     print("\n" + "=" * 70)
     print(f"{PASS} passed, {FAIL} failed")

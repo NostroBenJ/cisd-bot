@@ -31,6 +31,9 @@ RTH_OPEN_MIN = 9 * 60 + 30
 RTH_CLOSE_MIN = 16 * 60
 
 
+_NY_CACHE: dict[int, datetime] = {}
+
+
 @dataclass(frozen=True, slots=True)
 class Bar:
     """One OHLCV bar. `ts` is the left edge in epoch seconds, UTC."""
@@ -48,7 +51,14 @@ class Bar:
 
     @property
     def dt_ny(self) -> datetime:
-        return datetime.fromtimestamp(self.ts, NY)
+        # Memoised per timestamp: the session and minute-of-day properties
+        # derive from this and are read many times per bar per run, and the
+        # timezone conversion was a fifth of the engine's runtime.
+        d = _NY_CACHE.get(self.ts)
+        if d is None:
+            d = datetime.fromtimestamp(self.ts, NY)
+            _NY_CACHE[self.ts] = d
+        return d
 
     @property
     def minute_of_day_ny(self) -> int:
