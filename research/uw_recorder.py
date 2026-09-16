@@ -41,7 +41,7 @@ ROOT = Path(__file__).resolve().parent.parent
 STORE = ROOT / "data" / "uw"
 ENV_CANDIDATES = [
     ROOT / ".env",
-    Path("C:/Users/jontr/dev/nyam-terminal/engine/.env"),
+    Path((str(Path.home()) + "/dev/nyam-terminal/engine/.env")),
 ]
 
 # Endpoint -> URL template. {t} is the ticker. Every one of these accepts a

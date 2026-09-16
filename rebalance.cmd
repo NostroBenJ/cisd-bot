@@ -12,7 +12,7 @@ REM
 REM To stop it:   schtasks /Delete /TN "CISD Momentum Rebalance" /F
 REM To run now:   schtasks /Run /TN "CISD Momentum Rebalance"
 
-cd /d "C:\Users\jontr\dev\cisd-bot"
+cd /d "%~dp0"
 if not exist logs mkdir logs
 
 for /f "tokens=1-3 delims=/ " %%a in ("%date%") do set STAMP=%%c-%%a-%%b

@@ -46,7 +46,7 @@ from pathlib import Path
 
 from research.cboe import close_series
 
-SPY_CSV = Path("C:/Users/jontr/Downloads/spy_vix_daily.csv")
+SPY_CSV = Path((str(Path.home()) + "/Downloads/spy_vix_daily.csv"))
 TRADING_DAYS = 252.0
 
 # Round-trip cost as a fraction of the straddle's price. A SPY 0DTE ATM
